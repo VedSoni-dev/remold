@@ -1,206 +1,177 @@
-// A mix: several sites in one tab. Each pane is a real site in a frame (the background drops the headers that stop
-// framing, for this tab only), and every mod the person made for that site still runs inside its pane.
+// The mix tab: every other tab in this Chrome tab group is a live source. Say what you want and Remold reads all of
+// them (and visits pages for you if it needs to), then the AI builds one combined view here.
 const local = chrome.storage.local;
 const id = location.hash.slice(1);
 const $ = (s) => document.querySelector(s);
-const panesEl = $(".panes");
-let mix = null;
+let mix = null, sources = [], busy = false, liveTimer = 0, layoutOverride = null;
 
 const send = (type, data = {}) => chrome.runtime.sendMessage({ type, ...data }).then((r) => {
   if (!r?.ok) { const e = new Error(r?.error ?? "Something went wrong."); e.link = r?.link; throw e; }
   return r.data;
 });
-const hostOf = (u) => { try { return new URL(u).hostname.replace(/^www\./, ""); } catch { return u; } };
-const favicon = (u) => `https://www.google.com/s2/favicons?sz=64&domain=${hostOf(u)}`;
-
-async function save() {
-  const { mixes = {} } = await local.get("mixes");
-  mixes[id] = mix;
-  await local.set({ mixes });
-}
-
-async function boot() {
-  const { mixes = {} } = await local.get("mixes");
-  mix = mixes[id];
-  if (!mix) { document.body.textContent = "This mix was removed."; return; }
-  await send("mixAllow"); // framing headers off for this tab, before any frame loads
-  render(true);
-}
-
-/** Pane sizes become grid tracks. focus: first pane big, the rest stacked on the right. */
-function tracks() {
-  const n = mix.panes.length, s = mix.panes.map((p) => `${p.size}fr`);
-  switch (mix.layout) {
-    case "rows": return { cols: "1fr", rows: s.join(" "), area: (i) => `${i + 1} / 1 / ${i + 2} / 2` };
-    case "grid": {
-      const c = Math.ceil(Math.sqrt(n)), r = Math.ceil(n / c);
-      return { cols: `repeat(${c}, 1fr)`, rows: `repeat(${r}, 1fr)`, area: (i) => `${Math.floor(i / c) + 1} / ${(i % c) + 1}` };
-    }
-    case "focus": {
-      if (n === 1) return { cols: "1fr", rows: "1fr", area: () => "1 / 1" };
-      const rest = mix.panes.slice(1).map((p) => `${p.size}fr`).join(" ");
-      return { cols: `${mix.panes[0].size * 2.2}fr 1fr`, rows: rest, area: (i) => (i === 0 ? `1 / 1 / ${n} / 2` : `${i} / 2 / ${i + 1} / 3`) };
-    }
-    default: return { cols: s.join(" "), rows: "1fr", area: (i) => `1 / ${i + 1} / 2 / ${i + 2}` };
+function h(tag, props = {}, ...kids) {
+  const el = document.createElement(tag);
+  for (const [k, v] of Object.entries(props ?? {})) {
+    if (v == null || v === false) continue;
+    if (k === "class") el.className = v; else if (k.startsWith("on")) el.addEventListener(k.slice(2), v); else el.setAttribute(k, v === true ? "" : v);
   }
-}
-
-const frames = new Map(); // url+index -> pane element (kept across re-layouts so pages don't reload)
-
-function render(first = false) {
-  document.title = mix.title;
-  $(".title").value = mix.title;
-  $("#user-css").textContent = mix.css || "";
-  document.querySelectorAll(".layouts button").forEach((b) => b.setAttribute("aria-pressed", String(b.dataset.layout === mix.layout)));
-  const t = tracks();
-  panesEl.style.gridTemplateColumns = t.cols;
-  panesEl.style.gridTemplateRows = t.rows;
-  const keep = new Set();
-  mix.panes.forEach((p, i) => {
-    const key = `${i}:${p.url}`;
-    keep.add(key);
-    let el = frames.get(key);
-    if (!el) { el = paneEl(p, i); frames.set(key, el); }
-    el.style.gridArea = t.area(i);
-    el.dataset.i = i;
-    el.querySelector(".z").textContent = `${Math.round(p.zoom * 100)}%`;
-    applyZoom(el, p.zoom);
-    panesEl.append(el);
-  });
-  for (const [k, el] of frames) if (!keep.has(k)) { el.remove(); frames.delete(k); }
-  grips();
-  if (first) setTimeout(checkBlocked, 6000);
-}
-
-function paneEl(p, i) {
-  const el = document.createElement("article");
-  el.className = "pane";
-  el.innerHTML = `<div class="pane-head" draggable="true"><img alt=""><span class="h"></span>
-    <button class="zo" title="Zoom out">−</button><button class="z" title="Reset zoom"></button><button class="zi" title="Zoom in">+</button>
-    <button class="rl" title="Reload">↻</button><button class="op" title="Open in its own tab">↗</button><button class="rm" title="Remove from mix">×</button></div>
-    <div class="frame-wrap"><iframe allow="autoplay; fullscreen; clipboard-read; clipboard-write; encrypted-media; picture-in-picture"
-      sandbox="allow-scripts allow-same-origin allow-forms allow-popups allow-popups-to-escape-sandbox allow-modals allow-downloads allow-presentation allow-storage-access-by-user-activation"></iframe>
-      <div class="blocked"><div><b></b><p>This site refused to load inside a mix. Open it in its own tab instead.</p></div></div></div>`;
-  el.querySelector("img").src = favicon(p.url);
-  el.querySelector(".h").textContent = hostOf(p.url);
-  el.querySelector(".blocked b").textContent = hostOf(p.url);
-  el.querySelector("iframe").src = p.url;
-  const idx = () => Number(el.dataset.i);
-  const zoom = (d) => { const q = mix.panes[idx()]; q.zoom = Math.min(1.5, Math.max(0.4, Math.round((d ? q.zoom + d : 1) * 10) / 10)); save(); render(); };
-  el.querySelector(".zo").onclick = () => zoom(-0.1);
-  el.querySelector(".zi").onclick = () => zoom(0.1);
-  el.querySelector(".z").onclick = () => zoom(0);
-  el.querySelector(".rl").onclick = () => { const f = el.querySelector("iframe"); f.src = f.src; };
-  el.querySelector(".op").onclick = () => chrome.tabs.create({ url: mix.panes[idx()].url });
-  el.querySelector(".rm").onclick = () => { mix.panes.splice(idx(), 1); frames.clear(); panesEl.replaceChildren(); save(); render(); };
-  // drag a pane's head onto another to swap them
-  const head = el.querySelector(".pane-head");
-  head.addEventListener("dragstart", (e) => { e.dataTransfer.setData("text/remold-pane", String(idx())); document.body.classList.add("dragging"); });
-  head.addEventListener("dragend", () => document.body.classList.remove("dragging"));
-  el.addEventListener("dragover", (e) => { if (e.dataTransfer.types.includes("text/remold-pane")) { e.preventDefault(); el.classList.add("drop"); } });
-  el.addEventListener("dragleave", () => el.classList.remove("drop"));
-  el.addEventListener("drop", (e) => {
-    el.classList.remove("drop");
-    const from = Number(e.dataTransfer.getData("text/remold-pane")), to = idx();
-    if (Number.isNaN(from) || from === to) return;
-    [mix.panes[from], mix.panes[to]] = [mix.panes[to], mix.panes[from]];
-    // keep the loaded frames: swap their keys
-    const a = [...frames.entries()].find(([, v]) => Number(v.dataset.i) === from), b = [...frames.entries()].find(([, v]) => Number(v.dataset.i) === to);
-    frames.clear();
-    if (a && b) { frames.set(`${to}:${mix.panes[to].url}`, a[1]); frames.set(`${from}:${mix.panes[from].url}`, b[1]); }
-    save(); render();
-  });
-  // follow the pane's own navigation so the mix remembers where you were
-  el.querySelector("iframe").addEventListener("load", () => { el.dataset.loaded = "1"; });
+  for (const kid of kids.flat()) if (kid != null && kid !== false) el.append(kid.nodeType ? kid : document.createTextNode(String(kid)));
   return el;
 }
+const fav = (site) => `https://www.google.com/s2/favicons?sz=64&domain=${site}`;
+const safe = (u) => (typeof u === "string" && /^https?:\/\//.test(u) ? u : null);
 
-function applyZoom(el, z) {
-  const f = el.querySelector("iframe");
-  f.style.width = `${100 / z}%`; f.style.height = `${100 / z}%`; f.style.transform = `scale(${z})`;
+// ---------- sources ----------
+async function loadSources() {
+  try { const r = await send("mixSources", { mixId: id }); mix = r.mix; sources = r.sources; } catch (e) { document.body.textContent = e.message; return; }
+  document.title = `${mix.title} · Remold mix`;
+  if (document.activeElement !== $(".title")) $(".title").value = mix.title;
+  const counts = mix.lastSources ?? {};
+  $(".sources").replaceChildren(...(sources.length ? sources.map((s) => h("li", { title: s.url, onclick: () => chrome.tabs.update(s.tabId, { active: true }) },
+    h("span", { class: "sid" }, s.sid), h("img", { src: s.favIconUrl || fav(s.host), alt: "" }),
+    h("span", { class: "t" }, h("b", {}, s.host), " ", s.title ?? ""), counts[s.host] != null ? h("span", { class: "n" }, `${counts[s.host]} items`) : null))
+    : [h("li", {}, h("span", { class: "t" }, "No tabs yet. Drag tabs into this group."))]));
 }
+chrome.tabs.onUpdated.addListener((_, ch) => { if (ch.status === "complete" || ch.title || "groupId" in ch) loadSources(); });
+chrome.tabs.onRemoved.addListener(() => loadSources());
+chrome.tabs.onAttached?.addListener(() => loadSources());
+$(".title").addEventListener("change", async (e) => {
+  const { mixes = {} } = await local.get("mixes");
+  if (mixes[id]) { mixes[id].title = e.target.value.trim() || mixes[id].title; await local.set({ mixes }); mix = mixes[id]; }
+  if (mix.groupId != null) chrome.tabGroups.update(mix.groupId, { title: mix.title }).catch(() => {});
+});
 
-/** Drag handles between columns/rows change pane sizes. */
-function grips() {
-  panesEl.querySelectorAll(".grip").forEach((g) => g.remove());
-  if (!["columns", "rows"].includes(mix.layout) || mix.panes.length < 2) return;
-  const vertical = mix.layout === "columns";
-  const els = [...panesEl.querySelectorAll(".pane")].sort((a, b) => a.dataset.i - b.dataset.i);
-  for (let i = 1; i < els.length; i++) {
-    const g = document.createElement("div");
-    g.className = `grip ${vertical ? "v" : "h"}`;
-    const r = els[i].getBoundingClientRect(), pr = panesEl.getBoundingClientRect();
-    if (vertical) g.style.left = `${r.left - pr.left}px`; else { g.style.top = `${r.top - pr.top}px`; }
-    g.style.position = "absolute";
-    panesEl.style.position = "relative";
-    g.addEventListener("pointerdown", (e) => {
-      e.preventDefault();
-      g.setPointerCapture(e.pointerId);
-      document.body.classList.add("dragging");
-      const a = mix.panes[i - 1], b = mix.panes[i], total = a.size + b.size;
-      const ra = els[i - 1].getBoundingClientRect(), rb = els[i].getBoundingClientRect();
-      const span = vertical ? rb.right - ra.left : rb.bottom - ra.top, start = vertical ? ra.left : ra.top;
-      const move = (ev) => {
-        const frac = Math.min(0.88, Math.max(0.12, ((vertical ? ev.clientX : ev.clientY) - start) / span));
-        a.size = +(total * frac).toFixed(3); b.size = +(total - a.size).toFixed(3);
-        const t = tracks();
-        panesEl.style.gridTemplateColumns = t.cols; panesEl.style.gridTemplateRows = t.rows;
-      };
-      const up = () => { g.removeEventListener("pointermove", move); document.body.classList.remove("dragging"); save(); grips(); };
-      g.addEventListener("pointermove", move);
-      g.addEventListener("pointerup", up, { once: true });
-    });
-    panesEl.append(g);
+// ---------- chat + run ----------
+function chatView(work) {
+  const box = $(".chat");
+  const items = (mix?.chat ?? []).map((c) => h("div", { class: `msg ${c.role}` }, c.text, c.role === "ai" && c.lookups ? `\n(visited ${c.lookups} pages)` : ""));
+  if (!items.length && !work) {
+    items.push(h("div", { class: "chips" }, suggestions().map((s) => h("button", { class: "chip", type: "button", onclick: () => run(s) }, s))));
   }
+  if (work) items.push(h("div", { class: "msg work" }, h("span", { class: "dot" }), work));
+  box.replaceChildren(...items);
+  box.scrollTop = box.scrollHeight;
 }
-window.addEventListener("resize", () => grips());
-
-/** A frame that never painted anything we can see is likely blocked (some sites stop framing in other ways). */
-function checkBlocked() {
-  for (const el of panesEl.querySelectorAll(".pane")) if (!el.dataset.loaded) el.querySelector(".blocked").classList.add("on");
+function suggestions() {
+  const hosts = sources.map((s) => s.host);
+  const has = (x) => hosts.some((hh) => hh.includes(x));
+  const out = ["Merge everything into one feed, newest first", "Only what's about AI, from every tab", "One table of everything with links"];
+  if (has("x.com") && has("linkedin")) out.unshift("Match each X poster to their LinkedIn profile");
+  if (has("youtube") && has("x.com")) out.unshift("Pair each YouTube video with what people on X say about it");
+  if (hosts.length >= 2) out.push("What do these tabs have in common?");
+  return out.slice(0, 5);
 }
+chrome.runtime.onMessage.addListener((m) => { if (m?.type === "mixProgress" && m.mixId === id && busy) chatView(m.text); });
 
-// ---------- the bar ----------
-document.querySelectorAll(".layouts button").forEach((b) => b.addEventListener("click", () => { mix.layout = b.dataset.layout; save(); render(); }));
-$(".title").addEventListener("change", (e) => { mix.title = e.target.value.trim() || mix.title; save(); render(); });
-$(".unmix").addEventListener("click", () => send("unmix", { mixId: id }));
-$(".add").addEventListener("click", () => {
-  const d = document.createElement("dialog");
-  d.innerHTML = `<form method="dialog"><b>Add a site to the mix</b><input name="u" placeholder="news.ycombinator.com" autofocus><div class="row"><button class="ghost" value="cancel">Cancel</button><button value="ok">Add</button></div></form>`;
-  document.body.append(d);
-  d.showModal();
-  d.addEventListener("close", () => {
-    const v = d.querySelector("input").value.trim();
-    d.remove();
-    if (d.returnValue !== "ok" || !v) return;
-    const url = /^https?:\/\//.test(v) ? v : `https://${v}`;
-    try { new URL(url); } catch { return; }
-    mix.panes.push({ url, size: 1, zoom: 1 });
-    save(); render();
-  });
-});
-$(".ask").addEventListener("submit", async (e) => {
-  e.preventDefault();
-  const input = e.target.q, status = $(".status");
-  const q = input.value.trim();
-  if (!q) return;
-  input.disabled = true; status.textContent = "Arranging…";
+async function run(prompt) {
+  prompt = prompt.trim();
+  if (!prompt || busy) return;
+  busy = true; layoutOverride = null;
+  document.body.classList.add("busy");
+  $(".go").disabled = true;
+  mix.chat = [...(mix.chat ?? []), { role: "you", text: prompt }];
+  chatView(`Reading ${sources.length} tab${sources.length === 1 ? "" : "s"}…`);
   try {
-    const r = await send("arrangeMix", { mix, request: q });
-    if (r.mix) {
-      const urlsBefore = mix.panes.map((p) => p.url).join("|");
-      mix = { ...mix, ...r.mix, id };
-      if (mix.panes.map((p) => p.url).join("|") !== urlsBefore) { frames.clear(); panesEl.replaceChildren(); }
-      await save(); render();
+    const r = await send("mixRun", { mixId: id, prompt });
+    const { mixes = {} } = await local.get("mixes");
+    mix = mixes[id] ?? mix;
+    mix.lastSources = Object.fromEntries(r.sources.map((s) => [s.site, s.items]));
+    if (mixes[id]) { mixes[id].lastSources = mix.lastSources; await local.set({ mixes }); }
+    render();
+  } catch (e) {
+    mix.chat.push({ role: "err", text: e.message });
+  }
+  busy = false;
+  document.body.classList.remove("busy");
+  $(".go").disabled = false;
+  chatView();
+  loadSources();
+}
+$(".ask").addEventListener("submit", (e) => { e.preventDefault(); const q = e.target.q.value; e.target.q.value = ""; run(q); });
+$(".ask textarea").addEventListener("keydown", (e) => { if (e.key === "Enter" && !e.shiftKey) { e.preventDefault(); $(".ask").requestSubmit(); } });
+$(".ask input[name=live]").addEventListener("change", (e) => {
+  clearInterval(liveTimer);
+  if (e.target.checked) liveTimer = setInterval(() => { if (mix?.prompt && !busy && document.visibilityState === "visible") run(mix.prompt); }, 120_000);
+});
+
+// ---------- the view ----------
+function render() {
+  const v = mix?.view;
+  const root = $(".view");
+  if (!v) {
+    root.replaceChildren(h("div", { class: "empty" },
+      h("h1", {}, "Combine your ", h("span", {}, "tabs.")),
+      h("p", {}, "Every tab in this group is a source. Ask for anything across them: one merged feed, a table, posts matched to people's profiles on another site, videos paired with what people say about them. Remold reads the tabs, visits pages for you if it has to, and builds it here.")));
+    return;
+  }
+  const layout = layoutOverride ?? v.layout;
+  const tools = h("div", { class: "tools" }, ["feed", "cards", "table", "board", "columns"].map((l) =>
+    h("button", { "aria-pressed": String(l === layout), onclick: () => { layoutOverride = l; render(); } }, l)));
+  const head = h("div", { class: "vhead" }, h("div", {}, h("h1", {}, v.title), v.note ? h("div", { class: "note" }, v.note) : null), tools);
+  root.replaceChildren(head, layout === "table" ? table(v) : grouped(v, layout));
+}
+
+function srcChip(v, sid) {
+  const site = v.sites?.[sid];
+  return site ? h("span", { class: "src" }, h("img", { src: fav(site), alt: "" }), site) : null;
+}
+function card(v, x, i) {
+  const link = safe(x.link);
+  return h("article", { class: "card", style: `animation-delay:${Math.min(i, 20) * 25}ms` },
+    srcChip(v, x.source),
+    safe(x.image) ? h("img", { class: "pic", src: x.image, alt: "", loading: "lazy" }) : null,
+    x.title ? (link ? h("a", { class: "ttl", href: link, target: "_blank", rel: "noopener" }, x.title) : h("div", { class: "ttl" }, x.title)) : null,
+    x.text ? h("div", { class: "txt", onclick: (e) => e.currentTarget.classList.toggle("open") }, x.text) : null,
+    x.meta ? h("div", { class: "meta" }, x.meta) : null,
+    x.tags?.length ? h("div", { class: "tags" }, x.tags.map((t) => h("span", {}, t))) : null,
+    x.fields && Object.keys(x.fields).length ? h("dl", { class: "fields" }, Object.entries(x.fields).flatMap(([k, val]) => [h("dt", {}, k), h("dd", {}, val)])) : null,
+    x.related?.length ? h("div", { class: "related" }, h("div", { class: "lab" }, "matched"), x.related.map((r) => h("div", { class: "r" },
+      srcChip(v, r.source), " ", safe(r.link) ? h("a", { class: "ttl", href: r.link, target: "_blank", rel: "noopener" }, r.title || r.link) : h("b", {}, r.title || ""),
+      r.text ? h("div", {}, r.text) : null, r.meta ? h("div", { class: "meta" }, r.meta) : null))) : null,
+    link && !x.title ? h("a", { class: "meta", href: link, target: "_blank", rel: "noopener" }, link) : null);
+}
+function grouped(v, layout) {
+  if (layout === "feed" || layout === "cards") return h("div", { class: `items ${layout}` }, v.items.map((x, i) => card(v, x, i)));
+  const key = layout === "columns" ? (x) => v.sites?.[x.source] ?? "other" : (x) => x.group || "Other";
+  const groups = new Map();
+  for (const x of v.items) { const k = key(x); (groups.get(k) ?? groups.set(k, []).get(k)).push(x); }
+  return h("div", { class: `items ${layout}` }, [...groups].map(([k, xs]) => h("div", { class: "col" },
+    h("h3", {}, layout === "columns" ? h("img", { src: fav(k), alt: "", width: 14, height: 14 }) : null, `${k} · ${xs.length}`),
+    h("div", { class: "stack" }, xs.map((x, i) => card(v, x, i))))));
+}
+function table(v) {
+  const fieldKeys = [...new Set(v.items.flatMap((x) => Object.keys(x.fields ?? {})))].slice(0, 8);
+  const cols = ["source", "title", ...fieldKeys, "meta", "matched"];
+  return h("table", {}, h("thead", {}, h("tr", {}, cols.map((c) => h("th", {}, c)))),
+    h("tbody", {}, v.items.map((x) => h("tr", {}, cols.map((c) => h("td", {},
+      c === "source" ? srcChip(v, x.source)
+      : c === "title" ? (safe(x.link) ? h("a", { href: x.link, target: "_blank", rel: "noopener" }, x.title || x.text?.slice(0, 120) || x.link) : (x.title || x.text?.slice(0, 120) || ""))
+      : c === "meta" ? (x.meta ?? "")
+      : c === "matched" ? (x.related ?? []).map((r) => h("div", {}, safe(r.link) ? h("a", { href: r.link, target: "_blank", rel: "noopener" }, r.title || r.link) : (r.title || "")))
+      : (x.fields?.[c] ?? "")))))));
+}
+
+// ---------- the swarm while it works ----------
+(() => {
+  const cv = $(".swarm"), cx = cv.getContext("2d");
+  const cols = ["#ff5a1f", "#8b7bff", "#ffd23f", "#5ee0ff", "#ff6fae", "#ffffff"];
+  const bs = Array.from({ length: 90 }, (_, i) => ({ x: Math.random() * innerWidth, y: Math.random() * innerHeight, a: Math.random() * 6.28, r: 60 + Math.random() * 320, s: 0.7 + Math.random() * 0.6, c: cols[i % cols.length] }));
+  const draw = (now) => {
+    const W = cv.clientWidth, H = cv.clientHeight, d = Math.min(2, devicePixelRatio || 1);
+    if (cv.width !== W * d) { cv.width = W * d; cv.height = H * d; }
+    cx.setTransform(d, 0, 0, d, 0, 0);
+    cx.clearRect(0, 0, W, H);
+    if (document.body.classList.contains("busy")) for (const b of bs) {
+      b.a += 0.01 * b.s;
+      const tx = W / 2 + Math.cos(b.a + now / 3000) * b.r * 1.4, ty = H / 2 + Math.sin(b.a * 1.3) * b.r * 0.8;
+      b.x += (tx - b.x) * 0.05; b.y += (ty - b.y) * 0.05;
+      cx.save(); cx.translate(b.x, b.y); cx.scale(b.s, b.s);
+      cx.beginPath(); cx.moveTo(0, 0); cx.lineTo(0, 17); cx.lineTo(4.5, 13); cx.lineTo(7.5, 20); cx.lineTo(10.2, 18.8); cx.lineTo(7.3, 12.4); cx.lineTo(13, 12.4); cx.closePath();
+      cx.fillStyle = b.c; cx.fill(); cx.lineWidth = 1.4; cx.strokeStyle = "#050507"; cx.stroke(); cx.restore();
     }
-    status.textContent = r.reply; input.value = "";
-  } catch (err) { status.textContent = err.message; }
-  input.disabled = false; input.focus();
-  setTimeout(() => { if (status.textContent && !input.value) status.textContent = ""; }, 6000);
-});
+    requestAnimationFrame(draw);
+  };
+  requestAnimationFrame(draw);
+})();
 
-chrome.storage.onChanged.addListener((ch, area) => {
-  if (area === "local" && ch.mixes) { const m = ch.mixes.newValue?.[id]; if (m && JSON.stringify(m) !== JSON.stringify(mix)) { mix = m; render(); } }
-});
-
-boot();
+(async () => { await loadSources(); render(); chatView(); })();

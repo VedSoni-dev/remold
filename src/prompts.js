@@ -98,22 +98,38 @@ export function rewriteUserMessage(instruction, texts) {
   return `Instruction: ${instruction}\n\nTexts:\n${texts.map((t, i) => `[${i + 1}] ${t.replace(/\s+/g, " ").slice(0, 300)}`).join("\n")}`;
 }
 
-export const MIX_SYSTEM = `You arrange a "mix": several websites shown side by side in one browser tab. You get the current mix
-(panes with url, size and zoom; a layout) and what the person wants. Answer with ONE JSON object only:
+export const MIX_SYSTEM = `You are Remold's mixer. The person has a Chrome tab group open; each tab is a source (X, YouTube, LinkedIn,
+news, anything). You get what Remold read from each source (the items on the page with their text, links and images,
+or the page text) and what they want. You build ONE combined view from all of it.
+
+Answer with ONE JSON object and nothing else.
+
+If you need more data first (e.g. to match each X poster to their LinkedIn, open a profile, search a site), ask for up
+to 8 pages to visit. Remold opens each in a background tab, signed in as the person, and sends back what it read:
+{ "reply": "what you're fetching, one short sentence", "lookups": [{ "url": "https://...", "for": "why, e.g. the item it belongs to" }] }
+Build lookup URLs from links you were given or from sites' public search pages (e.g. https://www.linkedin.com/search/results/people/?keywords=NAME).
+Only ask when it's needed for what they asked; you get at most 2 rounds.
+
+Otherwise answer with the view:
 {
-  "reply": "1 short sentence of what you changed",
-  "mix": {
-    "title": "short name",
-    "layout": "columns" | "rows" | "grid" | "focus",   // focus = first pane big, the rest stacked on the right
-    "panes": [{ "url": "https://...", "size": 1, "zoom": 1 }],   // size: relative share (0.5-4); zoom: 0.5-1.5
-    "css": "optional CSS for the mix shell: .mix (the whole tab), .bar (top bar), .pane (each pane), .pane-head"
+  "reply": "1-2 plain sentences: what you built (or what you couldn't find)",
+  "view": {
+    "title": "short name for this mix",
+    "note": "optional one line shown under the title",
+    "layout": "feed" | "cards" | "table" | "board" | "columns",   // board = grouped by each item's "group"; columns = one column per source
+    "items": [{
+      "source": "s1",                  // which source it came from
+      "title": "…", "text": "…", "image": "https://…", "link": "https://…", "meta": "author · time · views",
+      "tags": ["…"], "fields": { "name": "value" },   // fields become table columns
+      "group": "for board layout",
+      "related": [{ "source": "s2", "title": "…", "text": "…", "link": "…", "meta": "…" }]   // matched data from other sources
+    }]
   }
 }
-Keep every pane they did not ask to remove, in order unless they asked to reorder. Add a pane only when they name a site.`;
+Rules: use only data you were given or fetched; never invent posts, people, numbers or links. Keep the original
+links. Combine across sources when they asked to (merge, match, compare, dedupe, rank, summarise). If something
+couldn't be matched, say so in that item's related text or in reply. Up to 200 items.`;
 
-export function mixUserMessage(mix, request) {
-  return `Current mix:\n${JSON.stringify({ title: mix.title, layout: mix.layout, panes: mix.panes, css: mix.css || "" })}\n\nThey asked: ${request}`;
-}
 
 export const AI_EACH_SYSTEM = `You look at elements on a web page for a person's browser extension. You get one question or instruction and
 numbered texts. Answer with ONE JSON object only: {"answers":[...]} with exactly one entry per text, same order.
@@ -122,4 +138,13 @@ Answer types: "yesno" → true or false; "label" → a short label (1-4 words); 
 
 export function aiEachUserMessage(ask, answer, choices, texts) {
   return `Answer type: ${answer}${answer === "pick" ? ` (choices: ${choices.join(", ")})` : ""}\nQuestion / instruction: ${ask}\n\nTexts:\n${texts.map((t, i) => `[${i + 1}] ${t.slice(0, 900)}`).join("\n")}`;
+}
+
+export function mixUserMessage({ sources, lookups, request, earlier, round }) {
+  return [
+    earlier?.length ? `Earlier asks in this mix: ${earlier.map((e) => `"${e}"`).join(", ")}` : "",
+    `Sources:\n${JSON.stringify(sources)}`,
+    lookups?.length ? `Pages you asked to visit (round ${round}):\n${JSON.stringify(lookups)}` : "",
+    `They want: ${request}`,
+  ].filter(Boolean).join("\n\n");
 }

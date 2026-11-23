@@ -481,6 +481,60 @@
     return out.join(" ").slice(0, max);
   }
 
+  /** Structured read of the page for mixes: the main item lists (posts, videos, results) with text, links and images. */
+  async function extract(scroll) {
+    if (scroll && TOP) {
+      const y0 = scrollY;
+      for (let i = 0; i < 3; i++) { window.scrollBy(0, innerHeight * 0.9); await new Promise((r) => setTimeout(r, 650)); }
+      window.scrollTo(0, y0);
+      await new Promise((r) => setTimeout(r, 150));
+    }
+    const groups = new Map();
+    for (const el of document.querySelectorAll("body *")) {
+      if (SKIP.has(el.tagName.toUpperCase()) || el.dataset.remoldBy) continue;
+      const tid = el.getAttribute("data-testid");
+      const cls = [...el.classList].find((c) => !hashed(c) && !c.startsWith("remold"));
+      const key = tid ? `[data-testid="${tid}"]` : el.tagName.includes("-") ? el.tagName.toLowerCase() : el.tagName === "ARTICLE" ? "article"
+        : cls && !/^(SPAN|A|B|I|EM|STRONG|IMG|SVG|BUTTON|P|H\d)$/.test(el.tagName) ? `${el.tagName.toLowerCase()}.${cls}` : null;
+      if (!key) continue;
+      (groups.get(key) ?? groups.set(key, []).get(key)).push(el);
+    }
+    const scored = [];
+    for (const [key, els] of groups) {
+      if (els.length < 3 || els.length > 400) continue;
+      const lens = els.map((e) => (e.innerText || "").length);
+      const avg = lens.reduce((a, b) => a + b, 0) / els.length;
+      if (avg < 30 || avg > 4000) continue;
+      const links = els.filter((e) => e.querySelector("a[href]")).length / els.length;
+      scored.push({ key, els, score: Math.min(avg, 600) * Math.min(els.length, 40) * (0.5 + links) });
+    }
+    scored.sort((a, b) => b.score - a.score);
+    const picked = [];
+    for (const c of scored) {
+      if (picked.length >= 2) break;
+      if (picked.some((p) => c.els.some((e) => p.els.some((q) => q.contains(e) || e.contains(q))))) continue; // nested inside an already-picked list
+      picked.push(c);
+    }
+    const abs = (h) => { try { return new URL(h, location.href).href; } catch { return null; } };
+    const lists = picked.map((c) => ({
+      selector: c.key,
+      items: c.els.slice(0, 40).map((el) => {
+        const seen = new Set(), links = [];
+        for (const a of el.querySelectorAll("a[href]")) {
+          const href = abs(a.getAttribute("href"));
+          if (!href || href.startsWith("javascript:") || seen.has(href)) continue;
+          seen.add(href);
+          const t = (a.innerText || a.getAttribute("aria-label") || "").replace(/\s+/g, " ").trim().slice(0, 80);
+          links.push(t ? `${t} → ${href}` : href);
+          if (links.length >= 6) break;
+        }
+        const img = [...el.querySelectorAll("img")].find((i) => (i.naturalWidth || i.width) > 80 && i.currentSrc?.startsWith("http"));
+        return { text: (el.innerText || "").replace(/\s+/g, " ").trim().slice(0, 700), links, img: img?.currentSrc ?? "", time: el.querySelector("time")?.getAttribute("datetime") ?? "" };
+      }).filter((x) => x.text.length > 3),
+    }));
+    return { url: location.href, title: document.title, host, lists, screen: screenText(3000), text: (document.body?.innerText ?? "").replace(/\s+\n/g, "\n").slice(0, 9000) };
+  }
+
   // ---------- messages from the panel ----------
   chrome.runtime.onMessage.addListener((msg, _sender, respond) => {
     if (msg?.type === "snapshot") {
@@ -493,6 +547,11 @@
       if (active.has(msg.id)) { active.get(msg.id).stop(); active.delete(msg.id); }
       sync().then(() => setTimeout(() => respond(TOP ? { stats: stats[msg.id] ?? null } : null), msg.wait ?? 1500));
       return TOP;
+    }
+    if (msg?.type === "extract") {
+      if (!TOP) return false;
+      extract(!!msg.scroll).then(respond, () => respond(null));
+      return true;
     }
     if (msg?.type === "screenText") {
       if (!TOP) return false;

@@ -8,11 +8,10 @@ chrome.runtime.onInstalled.addListener(async () => {
   await chrome.sidePanel.setPanelBehavior({ openPanelOnActionClick: true }).catch(() => {});
   chrome.contextMenus.removeAll(() => {
     chrome.contextMenus.create({ id: "remold-open", title: "Remold this site", contexts: ["page", "action"] });
-    chrome.contextMenus.create({ id: "remold-mix-group", title: "Mix this tab group into one tab", contexts: ["page", "action"] });
+    chrome.contextMenus.create({ id: "remold-mix-group", title: "Combine this tab group into one tab", contexts: ["page", "action"] });
   });
-  await restoreMixRules();
 });
-chrome.runtime.onStartup.addListener(() => { restoreMixRules(); publik.sendUsage("app_opened"); });
+chrome.runtime.onStartup.addListener(() => { publik.sendUsage("app_opened"); });
 
 chrome.contextMenus.onClicked.addListener(async (info, tab) => {
   if (info.menuItemId === "remold-open" && tab) chrome.sidePanel.open({ tabId: tab.id }).catch(() => {});
@@ -128,32 +127,11 @@ const handlers = {
     return { granted, enabled, on: (await local.get("customCode")).customCode === true };
   },
 
-  // ---------- mixes ----------
+  // ---------- mixes: a tab group's tabs feed one new tab that combines their data ----------
   async mixFromGroup({ groupId }) { return mixFromGroup(groupId); },
   async mixFromTabs({ tabIds, title }) { return mixFromTabs(tabIds, title); },
-  async mixAllow(_, sender) { await allowFraming(sender.tab.id); return true; },
-  async unmix({ mixId }, sender) {
-    const { mixes = {} } = await local.get("mixes");
-    const mix = mixes[mixId];
-    if (!mix) return false;
-    const ids = [];
-    for (const p of mix.panes) ids.push((await chrome.tabs.create({ url: p.url, active: false, windowId: sender.tab.windowId })).id);
-    if (ids.length) {
-      const g = await chrome.tabs.group({ tabIds: ids, createProperties: { windowId: sender.tab.windowId } });
-      await chrome.tabGroups.update(g, { title: mix.title, ...(mix.color ? { color: mix.color } : {}) }).catch(() => {});
-      await chrome.tabs.update(ids[0], { active: true });
-    }
-    delete mixes[mixId];
-    await local.set({ mixes });
-    chrome.tabs.remove(sender.tab.id);
-    return true;
-  },
-  async arrangeMix({ mix, request }) {
-    const text = await publik.chat({ system: MIX_SYSTEM, messages: [{ role: "user", content: mixUserMessage(mix, request) }], tier: "balanced", maxTokens: 2000 });
-    const out = parseJSON(text);
-    if (!out?.mix) return { reply: String(out?.reply ?? "I couldn't arrange that. Try saying it another way."), mix: null };
-    return { reply: String(out.reply ?? "Done."), mix: cleanMix(out.mix, mix) };
-  },
+  async mixSources({ mixId }) { return mixSources(mixId); },
+  async mixRun({ mixId, prompt }, sender) { return mixRun(mixId, prompt, sender); },
 };
 
 // Custom code talks to Remold through chrome.runtime.sendMessage in its own world; only the AI calls are open to it.
@@ -271,12 +249,6 @@ export function cleanMod(m, customCode) {
   };
 }
 
-function cleanMix(m, prev) {
-  const panes = arr(m.panes).filter((p) => /^https?:\/\//.test(p?.url ?? "")).slice(0, 8).map((p) => ({
-    url: p.url, size: Math.min(4, Math.max(0.3, Number(p.size) || 1)), zoom: Math.min(1.5, Math.max(0.4, Number(p.zoom) || 1)) }));
-  return { ...prev, title: str(m.title, 60) || prev.title, layout: ["columns", "rows", "grid", "focus"].includes(m.layout) ? m.layout : prev.layout,
-    panes: panes.length ? panes : prev.panes, css: str(m.css, 20_000) };
-}
 
 async function hash(s) {
   const d = await crypto.subtle.digest("SHA-1", new TextEncoder().encode(s));
@@ -299,56 +271,144 @@ async function verdicts(name = "verdicts", cap = 8000) {
   };
 }
 
-// ---------- mixes: many tabs into one ----------
+// ---------- mixes: many tabs, one combined view ----------
+// A mix lives in its own tab inside a Chrome tab group. Every other tab in that group is a live source: Remold reads
+// each one (the items on the page, their links and images, the visible text), the person says what they want, and the
+// AI builds one view from all of it. It can also visit pages for them (in background tabs, signed in as them), e.g.
+// look up each poster on another site, before it builds the view.
 
-const GROUP_COLORS = new Set(["grey", "blue", "red", "yellow", "green", "pink", "purple", "cyan", "orange"]);
+const MIX_URL = chrome.runtime.getURL("src/mix.html");
+const isMixTab = (t) => (t.url ?? t.pendingUrl ?? "").startsWith(MIX_URL);
 
 async function mixFromGroup(groupId) {
-  const tabs = await chrome.tabs.query({ groupId });
+  const tabs = (await chrome.tabs.query({ groupId })).filter((t) => !isMixTab(t));
+  const existing = (await chrome.tabs.query({ groupId })).find(isMixTab);
+  if (existing) { await chrome.tabs.update(existing.id, { active: true }); return { mixId: existing.url.split("#")[1], tabId: existing.id }; }
   const g = await chrome.tabGroups.get(groupId).catch(() => null);
-  return mixFromTabs(tabs.map((t) => t.id), g?.title || null, g?.color);
-}
-
-async function mixFromTabs(tabIds, title, color) {
-  const tabs = (await Promise.all(tabIds.map((id) => chrome.tabs.get(id).catch(() => null)))).filter((t) => t && /^https?:/.test(t.url ?? ""));
-  if (tabs.length < 2) throw new Error("A mix needs at least two normal web pages.");
   const id = crypto.randomUUID().slice(0, 8);
-  const hosts = tabs.map((t) => new URL(t.url).hostname.replace(/^www\./, ""));
-  const mix = { id, title: title || hosts.slice(0, 3).join(" + "), color: GROUP_COLORS.has(color) ? color : null,
-    layout: tabs.length > 3 ? "grid" : "columns", panes: tabs.map((t) => ({ url: t.url, size: 1, zoom: 1 })), css: "", created: Date.now() };
   const { mixes = {} } = await local.get("mixes");
-  mixes[id] = mix;
+  mixes[id] = { id, groupId, title: g?.title || tabs.map((t) => hostOf(t.url)).filter(Boolean).slice(0, 3).join(" + ") || "Mix", chat: [], view: null, created: Date.now() };
   await local.set({ mixes });
-  const first = tabs[0];
-  const tab = await chrome.tabs.create({ url: chrome.runtime.getURL(`src/mix.html#${id}`), windowId: first.windowId, index: first.index, active: true });
-  await allowFraming(tab.id);
-  if (first.groupId !== -1) await chrome.tabs.group({ tabIds: [tab.id], groupId: first.groupId }).catch(() => {});
-  await chrome.tabs.remove(tabs.map((t) => t.id)).catch(() => {});
+  const last = tabs[tabs.length - 1];
+  const tab = await chrome.tabs.create({ url: `${MIX_URL}#${id}`, windowId: last?.windowId, index: last ? last.index + 1 : undefined, active: true });
+  await chrome.tabs.group({ tabIds: [tab.id], groupId }).catch(() => {});
   publik.beacon("active_session");
   return { mixId: id, tabId: tab.id };
 }
 
-/** Sites send headers that stop them being shown inside another page. For a mix tab only (Chrome session rule scoped to
- *  that one tab), Remold drops those headers on its frames, so the sites can sit side by side. No other tab is touched. */
-async function allowFraming(tabId) {
-  const id = 1000 + (tabId % 1_000_000);
-  await chrome.declarativeNetRequest.updateSessionRules({
-    removeRuleIds: [id],
-    addRules: [{ id, priority: 1, condition: { tabIds: [tabId], resourceTypes: ["sub_frame"] },
-      action: { type: "modifyHeaders", responseHeaders: [
-        { header: "x-frame-options", operation: "remove" },
-        { header: "content-security-policy", operation: "remove" },
-        { header: "content-security-policy-report-only", operation: "remove" },
-      ] } }],
+/** Pick tabs → put them in a new group → mix that group. */
+async function mixFromTabs(tabIds, title) {
+  const tabs = (await Promise.all(tabIds.map((id) => chrome.tabs.get(id).catch(() => null)))).filter((t) => t && /^https?:/.test(t.url ?? ""));
+  if (tabs.length < 1) throw new Error("Pick at least one normal web page.");
+  const groupId = await chrome.tabs.group({ tabIds: tabs.map((t) => t.id), createProperties: { windowId: tabs[0].windowId } });
+  await chrome.tabGroups.update(groupId, { title: title || "mix", color: "orange" }).catch(() => {});
+  return mixFromGroup(groupId);
+}
+
+const hostOf = (u) => { try { return new URL(u).hostname.replace(/^www\./, ""); } catch { return ""; } };
+
+/** The live sources: every normal web page in the mix's group. */
+async function mixSources(mixId) {
+  const { mixes = {} } = await local.get("mixes");
+  const mix = mixes[mixId];
+  if (!mix) throw new Error("This mix was removed.");
+  const tabs = mix.groupId != null && mix.groupId !== -1 ? await chrome.tabs.query({ groupId: mix.groupId }).catch(() => []) : [];
+  return { mix, sources: tabs.filter((t) => !isMixTab(t) && /^https?:/.test(t.url ?? "")).map((t, i) => ({ sid: `s${i + 1}`, tabId: t.id, url: t.url, title: t.title, host: hostOf(t.url), favIconUrl: t.favIconUrl ?? null })) };
+}
+
+async function extractTab(tabId, opts = {}) {
+  const ask = () => chrome.tabs.sendMessage(tabId, { type: "extract", scroll: opts.scroll !== false }, { frameId: 0 });
+  try { const r = await ask(); if (r?.url) return r; } catch { /* not injected yet */ }
+  const t = await chrome.tabs.get(tabId).catch(() => null);
+  if (t?.discarded) { await chrome.tabs.reload(tabId); await waitLoaded(tabId); }
+  await chrome.scripting.executeScript({ target: { tabId, allFrames: false }, files: ["src/content.js"] }).catch(() => {});
+  return ask().catch(() => null);
+}
+
+function waitLoaded(tabId, ms = 15000) {
+  return new Promise((res) => {
+    const done = () => { clearTimeout(to); chrome.tabs.onUpdated.removeListener(on); setTimeout(res, 1800); };
+    const on = (id, ch) => { if (id === tabId && ch.status === "complete") done(); };
+    const to = setTimeout(done, ms);
+    chrome.tabs.onUpdated.addListener(on);
+    chrome.tabs.get(tabId).then((t) => { if (t.status === "complete") done(); }).catch(done);
   });
 }
 
-chrome.tabs.onRemoved.addListener((tabId) => {
-  chrome.declarativeNetRequest.updateSessionRules({ removeRuleIds: [1000 + (tabId % 1_000_000)] }).catch(() => {});
-});
+/** Visit a page in a background tab (signed in as the person), read it, close it. */
+async function lookup(url, windowId) {
+  if (!/^https?:\/\//.test(url)) return { url, error: "not a web address" };
+  const tab = await chrome.tabs.create({ url, active: false, windowId });
+  try {
+    await waitLoaded(tab.id);
+    const r = await extractTab(tab.id, { scroll: false });
+    return r ? trimSource(r, 3500) : { url, error: "could not read the page" };
+  } finally { chrome.tabs.remove(tab.id).catch(() => {}); }
+}
 
-/** After a browser restart, open mix tabs need their rules back. */
-async function restoreMixRules() {
-  const tabs = await chrome.tabs.query({ url: chrome.runtime.getURL("src/mix.html") + "*" }).catch(() => []);
-  for (const t of tabs) await allowFraming(t.id).catch(() => {});
+/** Keep each source small enough for the model. */
+function trimSource(r, budget = 7000) {
+  const items = [];
+  let used = 0;
+  for (const list of r.lists ?? []) for (const it of list.items) {
+    const line = { text: it.text.slice(0, 500), links: it.links.slice(0, 4), img: it.img || undefined, time: it.time || undefined };
+    used += JSON.stringify(line).length;
+    if (used > budget) break;
+    items.push(line);
+  }
+  return { url: r.url, title: r.title, items, text: items.length < 4 ? (r.text ?? "").slice(0, Math.max(1500, budget - used)) : (r.screen ?? "").slice(0, 1200) };
+}
+
+async function mixRun(mixId, prompt, sender) {
+  const { mix, sources } = await mixSources(mixId);
+  if (!sources.length) throw new Error("This group has no web pages. Add tabs to the group, then ask again.");
+  const say = (text) => chrome.tabs.sendMessage(sender.tab.id, { type: "mixProgress", mixId, text }).catch(() => {});
+  const data = [];
+  for (const s of sources) {
+    say(`Reading ${s.host}…`);
+    const r = await extractTab(s.tabId);
+    data.push({ id: s.sid, site: s.host, ...(r ? trimSource(r) : { url: s.url, title: s.title, items: [], text: "(could not read this tab)" }) });
+  }
+  const history = (mix.chat ?? []).filter((c) => c.role === "you").slice(-4).map((c) => c.text);
+  let lookups = [];
+  let out = null;
+  for (let round = 0; round < 3; round++) {
+    say(round ? "Building it with what it found…" : "Building your mix…");
+    const text = await publik.chat({ system: MIX_SYSTEM, messages: [{ role: "user", content: mixUserMessage({ sources: data, lookups, request: prompt, earlier: history, round }) }], tier: "smart", maxTokens: 8000 });
+    out = parseJSON(text);
+    if (!out) throw new Error("The AI answered in a shape Remold could not read. Try again.");
+    const want = Array.isArray(out.lookups) ? out.lookups.filter((l) => l && typeof l.url === "string").slice(0, 8) : [];
+    if (!want.length || round === 2) break;
+    say(`Visiting ${want.length} page${want.length === 1 ? "" : "s"}: ${String(out.reply ?? "").slice(0, 120)}`);
+    const got = [];
+    for (let i = 0; i < want.length; i += 3) got.push(...await Promise.all(want.slice(i, i + 3).map((l) => lookup(l.url, sender.tab.windowId).then((r) => ({ for: String(l.for ?? "").slice(0, 120), ...r })))));
+    lookups = lookups.concat(got);
+  }
+  const view = cleanView(out.view, data);
+  const reply = String(out.reply ?? (view ? "Done." : "I couldn't build that. Try saying it another way.")).slice(0, 600);
+  const { mixes = {} } = await local.get("mixes");
+  if (mixes[mixId]) {
+    mixes[mixId].chat = [...(mixes[mixId].chat ?? []), { role: "you", text: prompt }, { role: "ai", text: reply, lookups: lookups.length }].slice(-30);
+    if (view) { mixes[mixId].view = view; mixes[mixId].prompt = prompt; mixes[mixId].updated = Date.now(); }
+    await local.set({ mixes });
+  }
+  return { reply, view, lookups: lookups.length, sources: data.map((d) => ({ id: d.id, site: d.site, items: d.items.length })) };
+}
+
+const LAYOUTS = new Set(["feed", "cards", "table", "board", "columns"]);
+function cleanView(v, data) {
+  if (!v || typeof v !== "object" || !Array.isArray(v.items)) return null;
+  const sites = Object.fromEntries(data.map((d) => [d.id, d.site]));
+  const url = (u) => (typeof u === "string" && /^https?:\/\//.test(u) ? u.slice(0, 1000) : undefined);
+  const item = (x) => ({
+    source: typeof x.source === "string" && sites[x.source] ? x.source : undefined,
+    title: str(x.title, 300), text: str(x.text, 2000), image: url(x.image), link: url(x.link), meta: str(x.meta, 200),
+    tags: arr(x.tags).map((t) => str(t, 40)).filter(Boolean).slice(0, 6),
+    fields: x.fields && typeof x.fields === "object" ? Object.fromEntries(Object.entries(x.fields).slice(0, 10).map(([k, val]) => [str(k, 40), str(String(val ?? ""), 300)])) : undefined,
+    group: str(x.group, 80) || undefined,
+  });
+  return {
+    title: str(v.title, 100) || "Mix", note: str(v.note, 400), layout: LAYOUTS.has(v.layout) ? v.layout : "feed", sites,
+    items: v.items.slice(0, 200).map((x) => ({ ...item(x ?? {}), related: arr(x?.related).slice(0, 4).map((r) => item(r ?? {})) })),
+  };
 }

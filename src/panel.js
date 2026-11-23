@@ -219,7 +219,7 @@ function readyView() {
     const isMix = state.tab?.url?.startsWith(chrome.runtime.getURL("src/mix.html"));
     out.push(h("div", { class: "blocked" }, h("div", {},
       h("h2", {}, isMix ? "This is a mix" : "Open a website"),
-      h("p", {}, isMix ? "Describe its layout in the bar at the top of the tab. Mods you made for each site still apply inside it." : "Remold works on normal websites. Chrome doesn't let extensions change its own pages or the Web Store."),
+      h("p", {}, isMix ? "Ask for anything across the group's tabs in the mix itself. Mods you made for each site still run in those tabs." : "Remold works on normal websites. Chrome doesn't let extensions change its own pages or the Web Store."),
       !isMix && h("div", { class: "stack", style: "margin-top:14px" }, mixButtons()))));
     return out;
   }
@@ -229,8 +229,8 @@ function readyView() {
   if (state.group && state.group.tabs.length >= 2) {
     scroll.append(h("div", { class: "card mixcard" },
       h("div", { class: "dots" }, state.group.tabs.slice(0, 4).map((t) => h("img", { src: favicon(t.url), alt: "" }))),
-      h("div", { class: "txt" }, h("div", { class: "t" }, `Mix “${state.group.title}” into one tab`), h("div", { class: "s" }, `${state.group.tabs.length} tabs side by side, still yours to remold`)),
-      h("button", { class: "btn small", onclick: mixGroup }, "Mix")));
+      h("div", { class: "txt" }, h("div", { class: "t" }, `Combine “${state.group.title}” into one tab`), h("div", { class: "s" }, `${state.group.tabs.length} tabs feed one new tab. Ask for anything across them.`)),
+      h("button", { class: "btn small", onclick: mixGroup }, "Combine")));
   }
   if (state.picking) scroll.append(pickerView());
 
@@ -282,22 +282,22 @@ function readyView() {
 }
 
 function mixButtons() {
-  return h("button", { class: "btn ghost small", onclick: async () => { state.picking = true; state.tabsForPick = await chrome.tabs.query({ currentWindow: true }); render(); } }, "Mix tabs into one…");
+  return h("button", { class: "btn ghost small", onclick: async () => { state.picking = true; state.tabsForPick = await chrome.tabs.query({ currentWindow: true }); render(); } }, "Combine tabs into one…");
 }
 function pickerView() {
   const tabs = (state.tabsForPick ?? []).filter((t) => hostOf(t.url));
   const chosen = new Set(state.tab ? [state.tab.id] : []);
   const go = h("button", { class: "btn small", onclick: async () => {
-    if (chosen.size < 2) return;
+    if (chosen.size < 1) return;
     try { await send("mixFromTabs", { tabIds: [...chosen] }); state.picking = false; } catch (e) { alert(e.message); }
   } }, "Mix");
   return h("div", { class: "card" },
-    h("div", { class: "label" }, "Pick the tabs to mix"),
+    h("div", { class: "label" }, "Pick the tabs to combine"),
     h("div", { class: "pick" }, tabs.map((t) => h("label", {},
       h("input", { type: "checkbox", checked: chosen.has(t.id), onchange: (e) => { e.target.checked ? chosen.add(t.id) : chosen.delete(t.id); } }),
       h("img", { src: favicon(t.url), alt: "" }), h("span", {}, t.title || hostOf(t.url))))),
     h("div", { style: "display:flex;gap:8px;justify-content:flex-end" }, h("button", { class: "btn ghost small", onclick: () => { state.picking = false; render(); } }, "Cancel"), go),
-    h("p", { style: "margin:8px 2px 0;color:var(--muted);font-size:11.5px" }, "Tip: put tabs in a Chrome tab group and Remold offers to mix the whole group."));
+    h("p", { style: "margin:8px 2px 0;color:var(--muted);font-size:11.5px" }, "They go into a new tab group and keep running; a new tab combines their data. Tip: Remold also offers this on any tab group."));
 }
 async function mixGroup() {
   try { await send("mixFromGroup", { groupId: state.group.id }); } catch (e) { alert(e.message); }

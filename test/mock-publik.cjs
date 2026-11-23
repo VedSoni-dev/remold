@@ -22,7 +22,7 @@ http.createServer((req, res) => {
     if (url === "/api/v1/chat/completions") {
       const b = JSON.parse(body); const sys = b.messages[0].content; const user = b.messages[b.messages.length - 1].content;
       let out;
-      if (sys.startsWith("You are Remold")) {
+      if (sys.startsWith("You are Remold, a browser")) {
         const asked = user.split("They asked: ").pop();
         const cur = (user.match(/Current mod \(they are editing it\):\n(.*)/) || [])[1]; const c = cur ? JSON.parse(cur) : {};
         const fb = user.includes("What happened when your last mod ran");
@@ -38,6 +38,22 @@ http.createServer((req, res) => {
         const items = [...user.matchAll(/\[(\d+)\] (.*)/g)];
         out = { match: items.filter((m) => /\b(AI|LLMs?|GPT|OpenAI|Anthropic|Claude|Gemini|model|agents?|Perplexity)\b/i.test(m[2])).map((m) => Number(m[1])) };
         console.log("judged", items.length, "matched", out.match.length);
+      } else if (sys.startsWith("You are Remold's mixer")) {
+        const src = JSON.parse(user.split("Sources:\n")[1].split("\n\n")[0]);
+        const want = user.split("They want: ").pop();
+        const looked = user.includes("Pages you asked to visit") ? JSON.parse(user.split(/Pages you asked to visit \(round \d\):\n/)[1].split("\n\n")[0]) : null;
+        console.log("mix", want, "sources", src.map((x) => `${x.id}:${x.site}:${x.items.length}`).join(" "), looked ? `looked ${looked.length}` : "");
+        const by = (t) => (t.match(/by (\S+)/) || [])[1];
+        if (/profile/i.test(want) && !looked) {
+          const its = src[0].items.slice(0, 4);
+          out = { reply: "Opening each story to match it.", lookups: its.map((i) => ({ url: (i.links[0] || "").split(" → ").pop(), for: i.text.slice(0, 40) })) };
+        } else if (looked) {
+          out = { reply: `Matched ${looked.length} posters to their profiles.`, view: { title: "Posters, matched", layout: "feed", items: src[0].items.slice(0, 4).map((i, n) => ({ source: "s1", title: i.text.slice(0, 90), link: (i.links[0] || "").split(" → ").pop(), meta: "front page",
+            related: [{ title: looked[n]?.title || looked[n]?.error || "not found", link: looked[n]?.url, text: (looked[n]?.text || (looked[n]?.items || []).map((x) => x.text).join(" ")).replace(/\s+/g, " ").slice(0, 160) }] })) } };
+        } else {
+          const items = src.flatMap((x) => x.items.slice(0, 6).map((i) => ({ source: x.id, title: i.text.slice(0, 100), text: i.text.slice(100, 260), image: i.img, link: (i.links[0] || "").split(" → ").pop(), meta: x.site, group: x.site, fields: { site: x.site, chars: String(i.text.length) } })));
+          out = { reply: `Merged ${items.length} items from ${src.length} tabs.`, view: { title: "Everything, one feed", layout: /table/i.test(want) ? "table" : "cards", items } };
+        }
       } else if (sys.startsWith("You look at elements")) {
         const items = [...user.matchAll(/\[(\d+)\] (.*)/g)];
         const hype = (t) => /!|ultra|biggest|free|new|revealing|everything/i.test(t);

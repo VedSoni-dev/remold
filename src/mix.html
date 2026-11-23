@@ -6,26 +6,31 @@
   <title>Mix</title>
   <link rel="icon" href="../icons/32.png" />
   <link rel="stylesheet" href="mix.css" />
-  <style id="user-css"></style>
 </head>
 <body>
-  <div class="mix">
-    <header class="bar">
-      <input class="title" aria-label="Mix name" spellcheck="false" />
-      <div class="layouts" role="group" aria-label="Layout">
-        <button data-layout="columns" title="Columns"><svg viewBox="0 0 16 16"><rect x="1.5" y="2.5" width="5.5" height="11" rx="1.5"/><rect x="9" y="2.5" width="5.5" height="11" rx="1.5"/></svg></button>
-        <button data-layout="rows" title="Rows"><svg viewBox="0 0 16 16"><rect x="1.5" y="2" width="13" height="5.5" rx="1.5"/><rect x="1.5" y="8.5" width="13" height="5.5" rx="1.5"/></svg></button>
-        <button data-layout="grid" title="Grid"><svg viewBox="0 0 16 16"><rect x="1.5" y="1.5" width="5.5" height="5.5" rx="1.3"/><rect x="9" y="1.5" width="5.5" height="5.5" rx="1.3"/><rect x="1.5" y="9" width="5.5" height="5.5" rx="1.3"/><rect x="9" y="9" width="5.5" height="5.5" rx="1.3"/></svg></button>
-        <button data-layout="focus" title="Focus"><svg viewBox="0 0 16 16"><rect x="1.5" y="2.5" width="8.5" height="11" rx="1.5"/><rect x="11.5" y="2.5" width="3" height="5" rx="1"/><rect x="11.5" y="8.5" width="3" height="5" rx="1"/></svg></button>
+  <div class="app">
+    <aside class="rail">
+      <div class="head">
+        <img src="../icons/48.png" alt="" class="logo" />
+        <input class="title" aria-label="Mix name" spellcheck="false" />
       </div>
+      <div class="lbl">Sources · this tab group</div>
+      <ul class="sources"></ul>
+      <p class="hint">Drag more tabs into this group to add sources. They stay open; this tab reads them.</p>
+      <div class="lbl">Ask</div>
+      <div class="chat"></div>
       <form class="ask">
-        <input name="q" placeholder="Describe the mix… e.g. “X narrow on the left, YouTube big, add Hacker News”" autocomplete="off" />
-        <span class="status" aria-live="polite"></span>
+        <textarea name="q" rows="3" placeholder="What do you want from these tabs?"></textarea>
+        <div class="row">
+          <label class="live"><input type="checkbox" name="live" /> Live · rebuild every 2 min</label>
+          <button class="go" type="submit">Build</button>
+        </div>
       </form>
-      <button class="add" title="Add a site">+ Site</button>
-      <button class="unmix" title="Split back into tabs">Unmix</button>
-    </header>
-    <section class="panes"></section>
+    </aside>
+    <main class="stage">
+      <canvas class="swarm"></canvas>
+      <div class="view"></div>
+    </main>
   </div>
   <script type="module" src="mix.js"></script>
 </body>
