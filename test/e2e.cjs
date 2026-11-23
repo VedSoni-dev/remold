@@ -45,6 +45,8 @@ const log = (...a) => console.log(new Date().toISOString().slice(11, 19), ...a);
   await panel.close();
   const only = process.env.ONLY;
   if (!only || only === "hn") await ask("https://news.ycombinator.com/", ["Collapse every post about AI, LLMs or AI companies", "Make it look calm: warm paper background, serif headlines, more space between posts"], "hn");
+  if (only === "tone") await ask("https://news.ycombinator.com/", ["Show the tone of every headline and tint the hype ones"], "tone");
+  if (only === "js") { await sw.evaluate(() => chrome.storage.local.set({ customCode: true })); await ask("https://news.ycombinator.com/", ["Use custom code to label each post's topic"], "js"); }
   if (!only || only === "yt") await ask("https://www.youtube.com/results?search_query=lofi", ["Get rid of all thumbnails and anything Shorts", "Rewrite clickbait titles as plain, calm titles"], "yt");
   await ctx.close();
 })().catch((e) => { console.error(e); process.exit(1); });

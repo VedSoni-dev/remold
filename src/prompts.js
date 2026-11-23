@@ -24,6 +24,15 @@ Answer with ONE JSON object and nothing else (no prose, no code fence):
       "label": "2-3 words shown on collapsed or blurred items, e.g. 'Spam'",
       "also_next": 0                          // 0-3: following sibling elements that belong to the same item (e.g. a table row's detail rows)
     }],
+    "ai": [{                                  // AI on ANY element, in real time as it comes on screen: ask a question, act on the answer
+      "items": "selector for the elements to look at (posts, comments, headlines, prices, product cards, anything)",
+      "text": "optional selector inside each for the text to read",
+      "ask": "the question or instruction about each element, e.g. 'the sentiment in one word' or 'is this a sponsored post?'",
+      "then": "hide|collapse|blur|dim (the answer is yes/no: act on yes) | badge (a short label shown on it) | replace (new text) | style (pick one of styles)",
+      "label": "for badge: an optional prefix; for collapse: the words on the bar",
+      "badge_at": "optional selector inside the element to put the badge in",
+      "styles": { "category name": "css declarations for elements the AI puts in it" }   // for then=style, e.g. {"positive":"border-left:3px solid green","negative":"opacity:.5"}
+    }],
     "rewrite": [{                             // AI rewrites the text of matching elements (use sparingly)
       "items": "selector for short text elements, e.g. video titles",
       "instruction": "e.g. 'rewrite clickbait titles as plain descriptive titles in sentence case'"
@@ -39,7 +48,7 @@ Answer with ONE JSON object and nothing else (no prose, no code fence):
       "value": "class name, URL, or pixels for scroll_by"
     }],
     "redirect": [{ "from": "regex on pathname+search", "to": "/path or full URL" }],
-    "js": "optional plain JavaScript; ONLY when the person turned on custom code (you are told) and the kit cannot do it"
+    "js": "optional JavaScript; ONLY when the person turned on custom code (you are told) and the kit cannot do it. It runs as an async function body with window.remold: remold.ai(prompt,{json,tier}) → answer; remold.judge(els, rule) → booleans; remold.label(els, ask) → strings; remold.pick(els, ask, choices); remold.rewrite(els, instruction); remold.screenText() → what is on screen; remold.onScreen(selector, fn) runs fn(el) as each element comes on screen; remold.badge(el, text)."
   }
 }
 
@@ -47,7 +56,9 @@ How to write good mods:
 - Selectors must match the outline you were given. Prefer stable hooks: data-testid, id, role, aria-label, semantic tags,
   attribute-contains ([href*="/shorts"]). Avoid hashed classes like .css-1dbjc4n or .r-xyz unless nothing else exists.
 - "Hide X" uses "hide". A look or layout change uses "css". Judging content (spam, AI-written, rage bait, a topic) uses
-  "filters" on the repeated item list (use the "Repeated items" section to pick the item selector).
+  "filters" on the repeated item list (use the "Repeated items" section to pick the item selector). Anything else that needs
+  AI to read what's on screen (label each post's tone, flag sponsored content, translate comments, colour-code by topic,
+  summarise long posts into one line) uses "ai". Both run live as the person scrolls, only on what's on screen.
 - For a new background or theme, cover the page's real surfaces too (they often paint their own background):
   html, body, the main column, headers, cards. Keep text readable: set color with background.
 - Injected html is static (no scripts, no on* attributes). Give injected elements a class starting "remold-" and style
@@ -102,4 +113,13 @@ Keep every pane they did not ask to remove, in order unless they asked to reorde
 
 export function mixUserMessage(mix, request) {
   return `Current mix:\n${JSON.stringify({ title: mix.title, layout: mix.layout, panes: mix.panes, css: mix.css || "" })}\n\nThey asked: ${request}`;
+}
+
+export const AI_EACH_SYSTEM = `You look at elements on a web page for a person's browser extension. You get one question or instruction and
+numbered texts. Answer with ONE JSON object only: {"answers":[...]} with exactly one entry per text, same order.
+Answer types: "yesno" → true or false; "label" → a short label (1-4 words); "text" → the new text (about the same length);
+"pick" → exactly one of the listed choices, or null if none fits.`;
+
+export function aiEachUserMessage(ask, answer, choices, texts) {
+  return `Answer type: ${answer}${answer === "pick" ? ` (choices: ${choices.join(", ")})` : ""}\nQuestion / instruction: ${ask}\n\nTexts:\n${texts.map((t, i) => `[${i + 1}] ${t.slice(0, 900)}`).join("\n")}`;
 }

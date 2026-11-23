@@ -68,6 +68,7 @@
       inject();
       for (const f of filterState) scanFilter(f);
       for (const r of rewriteState) scanRewrite(r);
+      for (const a of aiState) scanAI(a);
       replaceText();
     };
 
@@ -131,6 +132,22 @@
     if ((spec.actions ?? []).some((a) => a.on === "key")) { window.addEventListener("keydown", onKey, true); cleanups.push(() => window.removeEventListener("keydown", onKey, true)); }
     const loadActions = (spec.actions ?? []).filter((a) => a.on === "load");
 
+    // Real time and on screen: AI only looks at elements on screen or about to be (800 px ahead), as you scroll.
+    const near = new WeakSet();
+    const watched = new WeakSet();
+    const io = new IntersectionObserver((entries) => {
+      let any = false;
+      for (const e of entries) if (e.isIntersecting && !near.has(e.target)) { near.add(e.target); any = true; }
+      if (any && alive) pass();
+    }, { rootMargin: "800px 0px 800px 0px" });
+    cleanups.push(() => io.disconnect());
+    const onScreen = (el) => { if (near.has(el)) return true; if (!watched.has(el)) { watched.add(el); io.observe(el); } return false; };
+    const textOf = (el, sel, max = 700) => {
+      let t = "";
+      try { t = (sel ? [...el.querySelectorAll(sel)].map((x) => x.innerText).join(" ") : el.innerText) || ""; } catch { t = el.innerText || ""; }
+      return t.replace(/\s+/g, " ").trim().slice(0, max);
+    };
+
     // AI filters: each item judged once (cached by text in the background)
     const filterState = (spec.filters ?? []).map((f, n) => ({ ...f, n, seen: new WeakMap(), queue: [], timer: 0, hidden: 0, judged: 0, matched: 0 }));
     st.filters = filterState.map((f) => ({ items: f.items, matched: 0, judged: 0, hidden: 0 }));
@@ -138,9 +155,8 @@
       const items = safeAll(f.items);
       st.filters[f.n].matched = items.length;
       for (const el of items) {
-        let text = "";
-        try { text = (f.text ? [...el.querySelectorAll(f.text)].map((t) => t.innerText).join(" ") : el.innerText) || ""; } catch { text = el.innerText || ""; }
-        text = text.trim().slice(0, 700);
+        if (el.dataset.remoldFiltered || !onScreen(el)) continue;
+        const text = textOf(el, f.text);
         if (text.length < 4) continue;
         const h = quickHash(text);
         if (f.seen.get(el) === h) continue;
@@ -204,6 +220,7 @@
       const items = safeAll(r.items);
       st.rewrite[r.n].matched = items.length;
       for (const el of items) {
+        if (!onScreen(el)) continue;
         const text = (el.innerText || "").trim();
         if (!text || text.length > 300 || r.done.get(el) === text) continue;
         r.done.set(el, text);
@@ -232,6 +249,68 @@
       st.rewrite[r.n].rewritten = r.count;
       if (r.queue.length) r.timer = setTimeout(() => flushRewrite(r), 50);
     }
+
+    // AI on anything: for each element on screen, ask the AI something and act on the answer.
+    //   then: hide|collapse|blur|dim (yes/no) · badge (a short label) · replace (new text) · style (pick one of "styles")
+    const aiState = (spec.ai ?? []).map((a, n) => ({ ...a, n, seen: new WeakMap(), queue: [], timer: 0, done: 0, acted: 0 }));
+    st.ai = aiState.map((a) => ({ items: a.items, matched: 0, done: 0, acted: 0 }));
+    const answerOf = (then) => (["hide", "collapse", "blur", "dim"].includes(then) ? "yesno" : then === "badge" ? "label" : then === "replace" ? "text" : "pick");
+    function scanAI(a) {
+      const items = safeAll(a.items);
+      st.ai[a.n].matched = items.length;
+      for (const el of items) {
+        if (el.dataset.remoldBy || !onScreen(el)) continue;
+        const text = textOf(el, a.text, a.then === "replace" ? 400 : 900);
+        if (text.length < 2) continue;
+        const h = quickHash(text);
+        if (a.seen.get(el) === h) continue;
+        a.seen.set(el, h);
+        a.queue.push({ el, h, text });
+      }
+      if (a.queue.length && !a.timer) a.timer = setTimeout(() => flushAI(a), 300);
+    }
+    async function flushAI(a) {
+      a.timer = 0;
+      const batch = a.queue.splice(0, 25);
+      if (!batch.length || !alive) return;
+      const uniq = [...new Map(batch.map((b) => [b.h, { h: b.h, text: b.text }])).values()];
+      const r = await chrome.runtime.sendMessage({ type: "aiEach", ask: a.ask, answer: answerOf(a.then), choices: Object.keys(a.styles ?? {}), items: uniq }).catch(() => null);
+      if (!alive) return;
+      if (r?.ok) for (const b of batch) { a.done++; if (b.el.isConnected && actAI(a, b.el, r.data[b.h], b.text)) a.acted++; }
+      else if (r && !r.ok) st.errors.push(r.error);
+      Object.assign(st.ai[a.n], { done: a.done, acted: a.acted });
+      if (a.queue.length) a.timer = setTimeout(() => flushAI(a), 50);
+    }
+    function actAI(a, el, v, text) {
+      if (v == null || v === false || v === "") return false;
+      if (["hide", "collapse", "blur", "dim"].includes(a.then)) { applyFilter(el, { action: a.then, label: a.label || "Hidden", also_next: a.also_next }); return true; }
+      if (a.then === "replace" && typeof v === "string" && v !== text) {
+        el.dataset.remoldOriginal ??= text;
+        const tn = deepestText(el); if (tn) tn.textContent = v; else el.textContent = v;
+        a.seen.set(el, quickHash(textOf(el, a.text, 400)));
+        return true;
+      }
+      if (a.then === "badge" && typeof v === "string") {
+        el.querySelectorAll(`:scope > .remold-badge[data-remold-by="${id}"]`).forEach((b) => b.remove());
+        const b = document.createElement("span");
+        b.className = "remold-badge"; b.dataset.remoldBy = id; b.textContent = `${a.label ? `${a.label}: ` : ""}${v}`.slice(0, 60);
+        (a.badge_at ? el.querySelector(a.badge_at) ?? el : el).prepend(b);
+        return true;
+      }
+      if (a.then === "style" && typeof v === "string" && a.styles?.[v] != null) {
+        el.dataset.remoldStyle = `${id}-${a.n}-${v}`.replace(/[^\w-]/g, "_");
+        return true;
+      }
+      return false;
+    }
+    // "style" answers become attribute rules in this mod's stylesheet
+    const styleRules = aiState.filter((a) => a.then === "style").flatMap((a) => Object.entries(a.styles ?? {}).map(([k, css]) =>
+      `[data-remold-style="${`${id}-${a.n}-${k}`.replace(/[^\w-]/g, "_")}"]{${css}}`)).join("\n");
+    if (styleRules) style.textContent += `\n${styleRules}`;
+    cleanups.push(() => {
+      document.querySelectorAll(`.remold-badge[data-remold-by="${id}"]`).forEach((b) => b.remove());
+      document.querySelectorAll(`[data-remold-style^="${id}-"]`).forEach((el) => delete el.dataset.remoldStyle);
+    });
 
     // regex text replacement in text nodes
     const replaced = new WeakSet();
@@ -278,6 +357,8 @@
  font:500 12px/1.3 ui-sans-serif,system-ui,-apple-system,sans-serif;letter-spacing:.01em;color:#6b6b6b;background:rgba(127,127,127,.09);
  cursor:pointer;text-align:left}
 .remold-filter-holder{list-style:none}
+.remold-badge{all:unset;display:inline-block;margin:0 6px 4px 0;padding:2px 8px;border-radius:999px;font:600 11px/1.5 ui-sans-serif,system-ui,-apple-system,sans-serif;
+ background:#c4572e;color:#fff;vertical-align:middle;white-space:nowrap}
 .remold-filter-tag:hover{background:rgba(127,127,127,.16);color:#3a3a3a}`;
 
   function sanitize(html) {
@@ -385,6 +466,21 @@
       .map(([k, e]) => `${k} ×${e.n}  e.g. "${e.sample}"`).join("\n");
   }
 
+  /** Everything readable on screen right now, top to bottom. */
+  function screenText(max) {
+    const out = [], vh = innerHeight;
+    const walk = document.createTreeWalker(document.body ?? document.documentElement, NodeFilter.SHOW_TEXT, { acceptNode: (n) =>
+      n.nodeValue.trim() && !n.parentElement?.closest("script,style,noscript,[data-remold-by]") ? NodeFilter.FILTER_ACCEPT : NodeFilter.FILTER_REJECT });
+    let n, len = 0;
+    while ((n = walk.nextNode()) && len < max) {
+      const r = n.parentElement.getBoundingClientRect();
+      if (r.bottom < 0 || r.top > vh || r.width === 0) continue;
+      const t = n.nodeValue.replace(/\s+/g, " ").trim();
+      out.push(t); len += t.length + 1;
+    }
+    return out.join(" ").slice(0, max);
+  }
+
   // ---------- messages from the panel ----------
   chrome.runtime.onMessage.addListener((msg, _sender, respond) => {
     if (msg?.type === "snapshot") {
@@ -397,6 +493,11 @@
       if (active.has(msg.id)) { active.get(msg.id).stop(); active.delete(msg.id); }
       sync().then(() => setTimeout(() => respond(TOP ? { stats: stats[msg.id] ?? null } : null), msg.wait ?? 1500));
       return TOP;
+    }
+    if (msg?.type === "screenText") {
+      if (!TOP) return false;
+      respond({ text: screenText(msg.max ?? 6000) });
+      return false;
     }
     if (msg?.type === "stats") { if (!TOP) return false; respond({ stats, host }); return false; }
     return false;

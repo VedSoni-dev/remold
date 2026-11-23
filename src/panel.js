@@ -111,6 +111,7 @@ function liveText(s) {
   if (hidden) bits.push(`${hidden} hidden`);
   for (const f of s.filters ?? []) if (f.matched) bits.push(f.judged ? `${f.hidden} of ${f.judged} filtered` : `judging ${f.matched}…`);
   for (const r of s.rewrite ?? []) if (r.rewritten) bits.push(`${r.rewritten} rewritten`);
+  for (const a of s.ai ?? []) if (a.matched) bits.push(a.done ? `AI on ${a.done}, changed ${a.acted}` : `AI reading ${a.matched}…`);
   if (s.inject) bits.push(`${s.inject} added`);
   if (s.replace) bits.push(`${s.replace} replaced`);
   if (s.errors?.length) return { text: s.errors[s.errors.length - 1].slice(0, 90), warn: true };
@@ -124,10 +125,11 @@ function feedbackFrom(spec, s) {
   for (const [sel, n] of Object.entries(s.hide ?? {})) if (!n) bad.push(`hide "${sel}" matched 0 elements`);
   (s.filters ?? []).forEach((f) => { if (!f.matched) bad.push(`filter items "${f.items}" matched 0 elements`); });
   (s.rewrite ?? []).forEach((r) => { if (!r.matched) bad.push(`rewrite items "${r.items}" matched 0 elements`); });
+  (s.ai ?? []).forEach((a) => { if (!a.matched) bad.push(`ai items "${a.items}" matched 0 elements`); });
   if ((spec.inject ?? []).length && !s.inject) bad.push("inject: none of the anchors matched");
   for (const e of s.errors ?? []) if (/^bad /.test(e)) bad.push(e);
   // a mod that only hides things and hid nothing at all is broken; partial misses are fine on sites that vary by page
-  const onlyHide = !spec.css && !(spec.filters ?? []).length && !(spec.inject ?? []).length && !(spec.rewrite ?? []).length;
+  const onlyHide = !spec.css && !(spec.filters ?? []).length && !(spec.inject ?? []).length && !(spec.rewrite ?? []).length && !(spec.ai ?? []).length;
   const total = Object.values(s.hide ?? {}).reduce((a, b) => a + b, 0);
   if (!bad.length) return null;
   if (!onlyHide && bad.length === 1 && total > 0) return null;

@@ -1,6 +1,6 @@
 // Remold's service worker: publik sign-in, every AI call, mod generation, the filter cache, custom code, and mixes.
 import * as publik from "./publik.js";
-import { FILTER_SYSTEM, MIX_SYSTEM, MOD_SYSTEM, REWRITE_SYSTEM, filterUserMessage, mixUserMessage, modUserMessage, rewriteUserMessage } from "./prompts.js";
+import { AI_EACH_SYSTEM, FILTER_SYSTEM, MIX_SYSTEM, MOD_SYSTEM, REWRITE_SYSTEM, aiEachUserMessage, filterUserMessage, mixUserMessage, modUserMessage, rewriteUserMessage } from "./prompts.js";
 
 const local = chrome.storage.local;
 
@@ -67,6 +67,35 @@ const handlers = {
     return out;
   },
 
+  /** The kit's "ai" block: one question about each element. answer: yesno | label | text | pick (one of choices). */
+  async aiEach({ ask, answer, choices, items }) {
+    const cache = await verdicts("aiEach", 8000);
+    const key = await hash(`${answer}|${ask}|${(choices ?? []).join(",")}`);
+    const ask2 = [], out = {};
+    for (const it of items) { const k = `${key}:${it.h}`; if (k in cache.map) out[it.h] = cache.map[k]; else ask2.push(it); }
+    for (let i = 0; i < ask2.length; i += 20) {
+      const chunk = ask2.slice(i, i + 20);
+      const text = await publik.chat({ system: AI_EACH_SYSTEM, messages: [{ role: "user", content: aiEachUserMessage(ask, answer, choices, chunk.map((c) => c.text)) }], tier: "fast", maxTokens: answer === "text" ? 2500 : 900 });
+      const arr = parseJSON(text)?.answers;
+      chunk.forEach((c, n) => {
+        let v = Array.isArray(arr) ? arr[n] : null;
+        if (answer === "yesno") v = v === true || v === "yes";
+        else if (answer === "pick") v = (choices ?? []).includes(v) ? v : null;
+        else v = typeof v === "string" && v.trim() ? v.trim() : null;
+        out[c.h] = v; cache.put(`${key}:${c.h}`, v);
+      });
+    }
+    cache.save();
+    return out;
+  },
+
+  /** Free-form AI, for custom code (remold.ai). */
+  async aiRaw({ prompt, system, tier, json }) {
+    const text = await publik.chat({ system: [system, json ? "Answer with one JSON value only: no prose, no code fence." : ""].filter(Boolean).join("\n\n") || undefined,
+      messages: [{ role: "user", content: String(prompt).slice(0, 30_000) }], tier: ["fast", "balanced", "smart"].includes(tier) ? tier : "fast", maxTokens: 3000 });
+    return json ? parseJSON(text) ?? (() => { try { return JSON.parse(text); } catch { return text; } })() : text;
+  },
+
   async rewrite({ instruction, items }) {
     const cache = await verdicts("rewrites", 3000);
     const key = await hash(instruction);
@@ -88,7 +117,8 @@ const handlers = {
   /** Custom code (only if the person turned it on and Chrome's "Allow User Scripts" is on). */
   async runjs({ code }, sender) {
     if (!(await customCodeOn()) || !chrome.userScripts?.execute) return { ran: false, why: "off" };
-    await chrome.userScripts.execute({ target: { tabId: sender.tab.id, frameIds: [sender.frameId ?? 0] }, js: [{ code }], world: "USER_SCRIPT", injectImmediately: true });
+    await chrome.userScripts.configureWorld({ messaging: true }).catch(() => {});
+    await chrome.userScripts.execute({ target: { tabId: sender.tab.id, frameIds: [sender.frameId ?? 0] }, js: [{ code: `${REMOLD_API}\n;(async () => {\n${code}\n})().catch((e) => console.warn("[remold]", e));` }], world: "USER_SCRIPT", injectImmediately: true });
     return { ran: true };
   },
   async userScriptsStatus() {
@@ -125,6 +155,51 @@ const handlers = {
     return { reply: String(out.reply ?? "Done."), mix: cleanMix(out.mix, mix) };
   },
 };
+
+// Custom code talks to Remold through chrome.runtime.sendMessage in its own world; only the AI calls are open to it.
+chrome.runtime.onUserScriptMessage?.addListener((msg, sender, respond) => {
+  const allowed = { ai: handlers.aiRaw, each: handlers.aiEach };
+  const h = allowed[msg?.type];
+  if (!h) return false;
+  Promise.resolve(h(msg, sender)).then((data) => respond({ ok: true, data }), (e) => respond({ ok: false, error: e?.message ?? String(e) }));
+  return true;
+});
+
+/** What custom code gets: window.remold. Real-time AI on anything on screen. */
+const REMOLD_API = `if (!globalThis.remold) {
+  const call = (m) => chrome.runtime.sendMessage(m).then((r) => { if (!r?.ok) throw new Error(r?.error || "Remold AI failed"); return r.data; });
+  const hashOf = (s) => { let h = 2166136261; for (let i = 0; i < s.length; i++) h = Math.imul(h ^ s.charCodeAt(i), 16777619); return (h >>> 0).toString(36) + s.length; };
+  const textOf = (x) => (typeof x === "string" ? x : (x?.innerText || "")).replace(/\\s+/g, " ").trim().slice(0, 900);
+  const each = async (els, ask, answer, choices) => {
+    const items = [...els].map((e) => ({ h: hashOf(textOf(e)), text: textOf(e) }));
+    const r = await call({ type: "each", ask, answer, choices, items });
+    return items.map((it) => r[it.h]);
+  };
+  globalThis.remold = {
+    /** Ask the AI anything. remold.ai("prompt", { json: true, tier: "fast"|"balanced"|"smart", system }) */
+    ai: (prompt, o = {}) => call({ type: "ai", prompt, ...o }),
+    /** true/false per element or string: does it match the rule? */
+    judge: (els, rule) => each(els, rule, "yesno"),
+    /** a short label per element (e.g. "sentiment in one word") */
+    label: (els, ask) => each(els, ask, "label"),
+    /** one of the choices per element */
+    pick: (els, ask, choices) => each(els, ask, "pick", choices),
+    /** new text per element */
+    rewrite: (els, instruction) => each(els, instruction, "text"),
+    /** Everything readable on screen right now. */
+    screenText: (max = 6000) => { const out = []; const w = document.createTreeWalker(document.body, NodeFilter.SHOW_TEXT); let n, len = 0;
+      while ((n = w.nextNode()) && len < max) { const t = n.nodeValue.replace(/\\s+/g, " ").trim(); if (!t || n.parentElement.closest("script,style")) continue;
+        const r = n.parentElement.getBoundingClientRect(); if (r.bottom < 0 || r.top > innerHeight || !r.width) continue; out.push(t); len += t.length + 1; } return out.join(" ").slice(0, max); },
+    /** Call fn(el) once for every element matching selector as it comes on screen (now and as the page scrolls or grows). */
+    onScreen: (selector, fn, margin = "600px") => { const seen = new WeakSet(), io = new IntersectionObserver((es) => es.forEach((e) => {
+        if (e.isIntersecting && !seen.has(e.target)) { seen.add(e.target); io.unobserve(e.target); Promise.resolve(fn(e.target)).catch((x) => console.warn("[remold]", x)); } }), { rootMargin: margin });
+      const scan = () => document.querySelectorAll(selector).forEach((el) => { if (!seen.has(el) && !el.__remoldObs) { el.__remoldObs = 1; io.observe(el); } });
+      scan(); new MutationObserver(scan).observe(document.documentElement, { childList: true, subtree: true }); },
+    /** Put a small label on an element. */
+    badge: (el, text) => { const b = document.createElement("span"); b.dataset.remoldBy = "js"; b.textContent = text;
+      b.style.cssText = "display:inline-block;margin:0 6px 4px 0;padding:2px 8px;border-radius:999px;font:600 11px/1.5 system-ui,sans-serif;background:#c4572e;color:#fff"; el.prepend(b); return b; },
+  };
+}`;
 
 chrome.runtime.onMessage.addListener((msg, sender, respond) => {
   const h = handlers[msg?.type];
@@ -187,6 +262,10 @@ export function cleanMod(m, customCode) {
     inject: arr(m.inject).filter((i) => i && i.at && i.html).slice(0, 12).map((i) => ({ at: str(i.at, 400), where: ["before", "after", "prepend", "append"].includes(i.where) ? i.where : "append", html: str(i.html, 20_000) })),
     actions: arr(m.actions).filter((a) => a && ACTIONS.has(a.do)).slice(0, 20).map((a) => ({
       on: ["load", "click", "key"].includes(a.on) ? a.on : "load", key: str(a.key, 20), trigger: str(a.trigger, 400), do: a.do, target: str(a.target, 400), value: str(a.value, 400) })),
+    ai: arr(m.ai).filter((a) => a && a.items && a.ask && ["hide", "collapse", "blur", "dim", "badge", "replace", "style"].includes(a.then)).slice(0, 6).map((a) => ({
+      items: str(a.items, 400), text: str(a.text, 400), ask: str(a.ask, 800), then: a.then, label: str(a.label, 40), badge_at: str(a.badge_at, 300),
+      also_next: Math.min(3, Math.max(0, Number(a.also_next) || 0)),
+      styles: a.then === "style" && a.styles && typeof a.styles === "object" ? Object.fromEntries(Object.entries(a.styles).slice(0, 8).map(([k, v]) => [str(k, 30), str(v, 600)])) : undefined })),
     redirect: arr(m.redirect).filter((r) => r && r.from && r.to).slice(0, 5).map((r) => ({ from: str(r.from, 300), to: str(r.to, 500) })),
     js: customCode ? str(m.js, 40_000) : "",
   };

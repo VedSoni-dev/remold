@@ -28,12 +28,23 @@ http.createServer((req, res) => {
         const fb = user.includes("What happened when your last mod ran");
         if (/AI/.test(asked)) out = mods.ai; else if (/calm/i.test(asked) && /paper/.test(asked)) out = mods.calm(c);
         else if (/thumbnail/i.test(asked)) { ytTries++; out = mods.thumbs(fb); } else if (/clickbait/i.test(asked)) out = mods.titles(c);
+        else if (/tone/i.test(asked)) out = { reply: "Each headline gets its tone, and hype ones are tinted.", mod: { title: "Headline tone", summary: "Labels each story's tone.",
+          ai: [{ items: "tr.athing", text: ".titleline > a", ask: "the tone of this headline in one word", then: "badge", badge_at: "td.title:last-child" },
+               { items: "tr.athing", text: ".titleline > a", ask: "is this headline hype or calm?", then: "style", styles: { hype: "background:rgba(196,87,46,.14)", calm: "opacity:.85" } }] } };
+        else if (/custom/i.test(asked)) out = { reply: "Custom code labels posts.", mod: { title: "JS labels", summary: "", js: "remold.onScreen('tr.athing', async (el) => { const [l] = await remold.label([el], 'topic in one word'); remold.badge(el.querySelector('td.title:last-child') || el, 'js: ' + l); });" } };
         else out = { reply: "What should change?", mod: null };
         console.log("mod request:", asked.slice(0, 60), fb ? "(repair)" : "", "| outline chars", user.length);
       } else if (sys.startsWith("You judge")) {
         const items = [...user.matchAll(/\[(\d+)\] (.*)/g)];
         out = { match: items.filter((m) => /\b(AI|LLMs?|GPT|OpenAI|Anthropic|Claude|Gemini|model|agents?|Perplexity)\b/i.test(m[2])).map((m) => Number(m[1])) };
         console.log("judged", items.length, "matched", out.match.length);
+      } else if (sys.startsWith("You look at elements")) {
+        const items = [...user.matchAll(/\[(\d+)\] (.*)/g)];
+        const hype = (t) => /!|ultra|biggest|free|new|revealing|everything/i.test(t);
+        if (/Answer type: label/.test(user)) out = { answers: items.map((m) => (hype(m[2]) ? "excited" : "neutral")) };
+        else if (/Answer type: pick/.test(user)) out = { answers: items.map((m) => (hype(m[2]) ? "hype" : "calm")) };
+        else out = { answers: items.map(() => false) };
+        console.log("aiEach", items.length);
       } else if (sys.startsWith("You rewrite")) {
         const items = [...user.matchAll(/\[(\d+)\] (.*)/g)];
         out = { out: items.map((m) => m[2].replace(/[^\p{L}\p{N}\s/,.'-]/gu, "").replace(/\s+/g, " ").trim().toLowerCase().replace(/^./, (c) => c.toUpperCase())) };
