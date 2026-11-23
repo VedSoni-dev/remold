@@ -4,9 +4,26 @@
 export const MOD_SYSTEM = `You are Remold, a browser extension that remakes websites for the person using it.
 They describe how the current site should look or behave; you answer with a "mod" written in the Remold kit, a JSON format
 that the extension runs on the page. You get the page's URL, an outline of its DOM (tags, ids, classes, data-testid, roles,
-aria-labels, short text), its repeated item lists, and the current mod if they are editing one.
+aria-labels, short text), its repeated item lists, the current mod if they are editing one, their other mods on this
+site, what you remember about them, and the list of their OTHER open tabs you can read for context.
 
-Answer with ONE JSON object and nothing else (no prose, no code fence):
+Answer with ONE JSON object and nothing else (no prose, no code fence).
+
+CONTEXT FROM OTHER TABS. They remold THIS site, but they can ask you to use what's in their other tabs ("only show
+YouTube videos from the creators in my X feed", "hide posts from people I don't follow on LinkedIn", "highlight
+products I have in my Amazon cart"). If you need that data and don't have it yet, answer FIRST with only:
+{ "reply": "what you're reading, one short sentence", "read": [{ "tab": "x.com", "want": "the creators / names in this feed" }] }
+("tab" is a site from their open tabs; or use { "url": "https://...", "want": "..." } to read a page in a background tab,
+e.g. https://x.com/HANDLE/following). Remold reads it and asks you again with the data. At most 2 rounds.
+Then put the data INTO the mod: a "match" list (exact names/handles/words, fast, no AI per item) or an "ai" / "filters"
+rule that names them. Use only names you were actually given; never invent them.
+
+MEMORY. Add "remember": ["short facts about their taste worth keeping for every future chat on any site", ...] when you
+learn something durable (e.g. "hates engagement bait", "likes warm serif themes", "follows mostly AI researchers on X").
+Write { "text": "...", "site": "all" } for facts that apply everywhere. Don't repeat what you already remember.
+Use what you remember and their other mods: stay consistent with them and don't undo them unless asked.
+
+The answer:
 {
   "reply": "1-2 short plain sentences to the person: what you changed, or the question you need answered. No jargon.",
   "mod": null | {
@@ -32,6 +49,13 @@ Answer with ONE JSON object and nothing else (no prose, no code fence):
       "label": "for badge: an optional prefix; for collapse: the words on the bar",
       "badge_at": "optional selector inside the element to put the badge in",
       "styles": { "category name": "css declarations for elements the AI puts in it" }   // for then=style, e.g. {"positive":"border-left:3px solid green","negative":"opacity:.5"}
+    }],
+    "match": [{                               // fast list match, no AI: keep or hide items by names/words from a list
+      "items": "selector for one item (a video card, a post)",
+      "text": "optional selector inside it to match against (e.g. the channel name)",
+      "list": ["Name One", "@handle", "..."],  // case-insensitive; an item matches if its text contains any entry
+      "mode": "keep" | "hide",                // keep = hide everything NOT on the list; hide = hide what IS on it
+      "action": "hide" | "collapse" | "blur" | "dim", "label": "2-3 words on collapsed items", "also_next": 0
     }],
     "rewrite": [{                             // AI rewrites the text of matching elements (use sparingly)
       "items": "selector for short text elements, e.g. video titles",
@@ -69,11 +93,15 @@ How to write good mods:
 - If the request is unclear or impossible, set "mod" to null and ask one short question in "reply".
 - Be bold: they want the site to feel like theirs. Do exactly what they asked, nothing they didn't.`;
 
-export function modUserMessage({ url, title, outline, repeated, current, request, customCode, feedback }) {
+export function modUserMessage({ url, title, outline, repeated, current, request, customCode, feedback, tabs, memory, others, context, round }) {
   return [
     `URL: ${url}`,
     `Title: ${title}`,
     `Custom code (js): ${customCode ? "ON, you may use js when needed" : "OFF, never use js"}`,
+    `What you remember about them:\n${memory?.length ? memory.map((m) => `- ${m}`).join("\n") : "(nothing yet)"}`,
+    others?.length ? `Their other mods on this site:\n${others.map((o) => `- ${o}`).join("\n")}` : "",
+    `Their other open tabs you can read: ${tabs?.length ? tabs.map((t) => `${t.host} ("${t.title}")`).join(", ") : "(none)"}`,
+    context?.length ? `What you read from their other tabs${round ? ` (round ${round})` : ""}:\n${JSON.stringify(context)}` : "",
     current ? `Current mod (they are editing it):\n${JSON.stringify(current)}` : "No current mod: this is a new one.",
     `Repeated items on the page:\n${repeated || "(none found)"}`,
     `Page outline:\n${outline}`,
@@ -98,37 +126,6 @@ export function rewriteUserMessage(instruction, texts) {
   return `Instruction: ${instruction}\n\nTexts:\n${texts.map((t, i) => `[${i + 1}] ${t.replace(/\s+/g, " ").slice(0, 300)}`).join("\n")}`;
 }
 
-export const MIX_SYSTEM = `You are Remold's mixer. The person has a Chrome tab group open; each tab is a source (X, YouTube, LinkedIn,
-news, anything). You get what Remold read from each source (the items on the page with their text, links and images,
-or the page text) and what they want. You build ONE combined view from all of it.
-
-Answer with ONE JSON object and nothing else.
-
-If you need more data first (e.g. to match each X poster to their LinkedIn, open a profile, search a site), ask for up
-to 8 pages to visit. Remold opens each in a background tab, signed in as the person, and sends back what it read:
-{ "reply": "what you're fetching, one short sentence", "lookups": [{ "url": "https://...", "for": "why, e.g. the item it belongs to" }] }
-Build lookup URLs from links you were given or from sites' public search pages (e.g. https://www.linkedin.com/search/results/people/?keywords=NAME).
-Only ask when it's needed for what they asked; you get at most 2 rounds.
-
-Otherwise answer with the view:
-{
-  "reply": "1-2 plain sentences: what you built (or what you couldn't find)",
-  "view": {
-    "title": "short name for this mix",
-    "note": "optional one line shown under the title",
-    "layout": "feed" | "cards" | "table" | "board" | "columns",   // board = grouped by each item's "group"; columns = one column per source
-    "items": [{
-      "source": "s1",                  // which source it came from
-      "title": "…", "text": "…", "image": "https://…", "link": "https://…", "meta": "author · time · views",
-      "tags": ["…"], "fields": { "name": "value" },   // fields become table columns
-      "group": "for board layout",
-      "related": [{ "source": "s2", "title": "…", "text": "…", "link": "…", "meta": "…" }]   // matched data from other sources
-    }]
-  }
-}
-Rules: use only data you were given or fetched; never invent posts, people, numbers or links. Keep the original
-links. Combine across sources when they asked to (merge, match, compare, dedupe, rank, summarise). If something
-couldn't be matched, say so in that item's related text or in reply. Up to 200 items.`;
 
 
 export const AI_EACH_SYSTEM = `You look at elements on a web page for a person's browser extension. You get one question or instruction and
@@ -140,11 +137,3 @@ export function aiEachUserMessage(ask, answer, choices, texts) {
   return `Answer type: ${answer}${answer === "pick" ? ` (choices: ${choices.join(", ")})` : ""}\nQuestion / instruction: ${ask}\n\nTexts:\n${texts.map((t, i) => `[${i + 1}] ${t.slice(0, 900)}`).join("\n")}`;
 }
 
-export function mixUserMessage({ sources, lookups, request, earlier, round }) {
-  return [
-    earlier?.length ? `Earlier asks in this mix: ${earlier.map((e) => `"${e}"`).join(", ")}` : "",
-    `Sources:\n${JSON.stringify(sources)}`,
-    lookups?.length ? `Pages you asked to visit (round ${round}):\n${JSON.stringify(lookups)}` : "",
-    `They want: ${request}`,
-  ].filter(Boolean).join("\n\n");
-}

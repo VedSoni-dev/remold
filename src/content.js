@@ -69,6 +69,7 @@
       for (const f of filterState) scanFilter(f);
       for (const r of rewriteState) scanRewrite(r);
       for (const a of aiState) scanAI(a);
+      for (const m of matchState) scanMatch(m);
       replaceText();
     };
 
@@ -311,6 +312,23 @@
       document.querySelectorAll(`.remold-badge[data-remold-by="${id}"]`).forEach((b) => b.remove());
       document.querySelectorAll(`[data-remold-style^="${id}-"]`).forEach((el) => delete el.dataset.remoldStyle);
     });
+
+    // match lists: keep or hide items by names/words (often data read from another tab), no AI per item
+    const matchState = (spec.match ?? []).map((m, n) => ({ ...m, n, seen: new WeakMap(), acted: 0, low: m.list.map((v) => v.toLowerCase().replace(/^@/, "")) }));
+    st.match = matchState.map((m) => ({ items: m.items, matched: 0, acted: 0, list: m.list.length }));
+    function scanMatch(m) {
+      const items = safeAll(m.items);
+      st.match[m.n].matched = items.length;
+      for (const el of items) {
+        if (el.dataset.remoldBy) continue;
+        const text = textOf(el, m.text, 1500).toLowerCase();
+        if (!text || m.seen.get(el) === text) continue;
+        m.seen.set(el, text);
+        const hit = m.low.some((v) => v && text.includes(v));
+        if (m.mode === "keep" ? !hit : hit) { if (!el.dataset.remoldFiltered) { applyFilter(el, { action: m.action, label: m.label, also_next: m.also_next }); m.acted++; } }
+      }
+      st.match[m.n].acted = m.acted;
+    }
 
     // regex text replacement in text nodes
     const replaced = new WeakSet();

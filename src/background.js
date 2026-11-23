@@ -1,6 +1,7 @@
-// Remold's service worker: publik sign-in, every AI call, mod generation, the filter cache, custom code, and mixes.
+// Remold's service worker: publik sign-in, every AI call, mod generation (with context from other tabs and a memory),
+// the filter cache and custom code.
 import * as publik from "./publik.js";
-import { AI_EACH_SYSTEM, FILTER_SYSTEM, MIX_SYSTEM, MOD_SYSTEM, REWRITE_SYSTEM, aiEachUserMessage, filterUserMessage, mixUserMessage, modUserMessage, rewriteUserMessage } from "./prompts.js";
+import { AI_EACH_SYSTEM, FILTER_SYSTEM, MOD_SYSTEM, REWRITE_SYSTEM, aiEachUserMessage, filterUserMessage, modUserMessage, rewriteUserMessage } from "./prompts.js";
 
 const local = chrome.storage.local;
 
@@ -8,17 +9,13 @@ chrome.runtime.onInstalled.addListener(async () => {
   await chrome.sidePanel.setPanelBehavior({ openPanelOnActionClick: true }).catch(() => {});
   chrome.contextMenus.removeAll(() => {
     chrome.contextMenus.create({ id: "remold-open", title: "Remold this site", contexts: ["page", "action"] });
-    chrome.contextMenus.create({ id: "remold-mix-group", title: "Combine this tab group into one tab", contexts: ["page", "action"] });
   });
+  await local.remove(["mixes"]); // the old combine tab (0.3.0) is gone
 });
 chrome.runtime.onStartup.addListener(() => { publik.sendUsage("app_opened"); });
 
 chrome.contextMenus.onClicked.addListener(async (info, tab) => {
   if (info.menuItemId === "remold-open" && tab) chrome.sidePanel.open({ tabId: tab.id }).catch(() => {});
-  if (info.menuItemId === "remold-mix-group" && tab) {
-    if (!(await publik.isReady())) { chrome.sidePanel.open({ tabId: tab.id }).catch(() => {}); return; }
-    if (tab.groupId !== -1) mixFromGroup(tab.groupId); else chrome.sidePanel.open({ tabId: tab.id }).catch(() => {});
-  }
 });
 
 // Usage: active_session every 30 minutes while the browser runs (publik's rule; the sender throttles itself).
@@ -33,18 +30,43 @@ const handlers = {
   async signOut() { await publik.signOut(); return publik.gate(); },
   async opened() { publik.sendUsage("app_opened"); return true; },
 
-  /** The panel asks for a mod: snapshot the tab, ask the AI, return { reply, mod }. */
-  async generate({ tabId, request, current, feedback, history }) {
+  /** The panel asks for a mod. Remold reads the page; the AI may first ask to read other open tabs (or pages) for
+   *  context ("the creators in my X feed"), then writes the mod with that data in it, plus anything worth remembering. */
+  async generate({ tabId, request, current, feedback, history, refresh }, sender) {
     const snap = await snapshot(tabId);
     const customCode = await customCodeOn();
-    const messages = [...(history ?? []).slice(-6),
-      { role: "user", content: modUserMessage({ ...snap, current, request, customCode, feedback }) }];
-    const text = await publik.chat({ system: MOD_SYSTEM, messages, tier: "smart", maxTokens: 6000 });
-    const out = parseJSON(text);
-    if (!out || typeof out !== "object") throw new Error("The AI answered in a shape Remold could not read. Try again.");
+    const tabs = await contextTabs(tabId);
+    const memory = await memoryFor(snap.host);
+    const { mods = [] } = await local.get("mods");
+    const others = mods.filter((m) => (m.host === snap.host || m.spec?.scope === "everywhere") && m.spec !== current && m.spec?.title !== current?.title)
+      .map((m) => `${m.enabled ? "on" : "off"}: ${m.spec.title}: ${m.spec.summary}`);
+    const say = (text) => chrome.runtime.sendMessage({ type: "progress", text }).catch(() => {});
+    let context = [];
+    if (refresh && current?.context?.length) { say("Re-reading your other tabs…"); context = await readContext(current.context, tabs, snap.url); }
+    let out = null;
+    for (let round = 0; round < 3; round++) {
+      const messages = [...(history ?? []).slice(-6),
+        { role: "user", content: modUserMessage({ ...snap, current, request, customCode, feedback, tabs, memory, others, context, round }) }];
+      out = parseJSON(await publik.chat({ system: MOD_SYSTEM, messages, tier: "smart", maxTokens: 7000 }));
+      if (!out || typeof out !== "object") throw new Error("The AI answered in a shape Remold could not read. Try again.");
+      const want = Array.isArray(out.read) ? out.read.filter((r) => r && (r.tab || r.url)).slice(0, 6) : [];
+      if (!want.length || round === 2) break;
+      say(`Reading ${want.map((w) => w.tab || hostOf(w.url)).join(", ")} for context…`);
+      context = context.concat(await readContext(want, tabs, snap.url));
+    }
     const mod = out.mod && typeof out.mod === "object" ? cleanMod(out.mod, customCode) : null;
-    return { reply: String(out.reply ?? (mod ? mod.summary : "Done.")).slice(0, 600), mod, host: snap.host };
+    if (mod && context.length) mod.context = context.map((c) => ({ tab: c.tab || undefined, url: c.tab ? undefined : c.url, want: c.want })).slice(0, 6);
+    else if (mod && current?.context) mod.context = current.context;
+    const remembered = await remember(out.remember, snap.host);
+    return { reply: String(out.reply ?? (mod ? mod.summary : "Done.")).slice(0, 600), mod, host: snap.host, read: context.length, remembered };
   },
+
+  // ---------- memory: what Remold knows about the person, kept across every chat ----------
+  async memoryList() { return (await local.get("memory")).memory ?? []; },
+  async memoryDelete({ id }) { const m = ((await local.get("memory")).memory ?? []).filter((f) => f.id !== id); await local.set({ memory: m }); return m; },
+  async memoryClear() { await local.set({ memory: [] }); return []; },
+  async memoryAdd({ text, host }) { await remember([text], host ?? null, true); return (await local.get("memory")).memory ?? []; },
+  async contextTabs({ tabId }) { return contextTabs(tabId); },
 
   /** Judge items against a filter rule. Cached by text, so each post is judged once. */
   async classify({ rule, items }) {
@@ -127,11 +149,6 @@ const handlers = {
     return { granted, enabled, on: (await local.get("customCode")).customCode === true };
   },
 
-  // ---------- mixes: a tab group's tabs feed one new tab that combines their data ----------
-  async mixFromGroup({ groupId }) { return mixFromGroup(groupId); },
-  async mixFromTabs({ tabIds, title }) { return mixFromTabs(tabIds, title); },
-  async mixSources({ mixId }) { return mixSources(mixId); },
-  async mixRun({ mixId, prompt }, sender) { return mixRun(mixId, prompt, sender); },
 };
 
 // Custom code talks to Remold through chrome.runtime.sendMessage in its own world; only the AI calls are open to it.
@@ -240,6 +257,10 @@ export function cleanMod(m, customCode) {
     inject: arr(m.inject).filter((i) => i && i.at && i.html).slice(0, 12).map((i) => ({ at: str(i.at, 400), where: ["before", "after", "prepend", "append"].includes(i.where) ? i.where : "append", html: str(i.html, 20_000) })),
     actions: arr(m.actions).filter((a) => a && ACTIONS.has(a.do)).slice(0, 20).map((a) => ({
       on: ["load", "click", "key"].includes(a.on) ? a.on : "load", key: str(a.key, 20), trigger: str(a.trigger, 400), do: a.do, target: str(a.target, 400), value: str(a.value, 400) })),
+    match: arr(m.match).filter((x) => x && x.items && Array.isArray(x.list) && x.list.length).slice(0, 4).map((x) => ({
+      items: str(x.items, 400), text: str(x.text, 400), list: x.list.map((v) => str(String(v), 80)).filter(Boolean).slice(0, 800),
+      mode: x.mode === "hide" ? "hide" : "keep", action: ["hide", "collapse", "blur", "dim"].includes(x.action) ? x.action : "hide", label: str(x.label, 40) || "Not on your list",
+      also_next: Math.min(3, Math.max(0, Number(x.also_next) || 0)) })),
     ai: arr(m.ai).filter((a) => a && a.items && a.ask && ["hide", "collapse", "blur", "dim", "badge", "replace", "style"].includes(a.then)).slice(0, 6).map((a) => ({
       items: str(a.items, 400), text: str(a.text, 400), ask: str(a.ask, 800), then: a.then, label: str(a.label, 40), badge_at: str(a.badge_at, 300),
       also_next: Math.min(3, Math.max(0, Number(a.also_next) || 0)),
@@ -271,49 +292,31 @@ async function verdicts(name = "verdicts", cap = 8000) {
   };
 }
 
-// ---------- mixes: many tabs, one combined view ----------
-// A mix lives in its own tab inside a Chrome tab group. Every other tab in that group is a live source: Remold reads
-// each one (the items on the page, their links and images, the visible text), the person says what they want, and the
-// AI builds one view from all of it. It can also visit pages for them (in background tabs, signed in as them), e.g.
-// look up each poster on another site, before it builds the view.
-
-const MIX_URL = chrome.runtime.getURL("src/mix.html");
-const isMixTab = (t) => (t.url ?? t.pendingUrl ?? "").startsWith(MIX_URL);
-
-async function mixFromGroup(groupId) {
-  const tabs = (await chrome.tabs.query({ groupId })).filter((t) => !isMixTab(t));
-  const existing = (await chrome.tabs.query({ groupId })).find(isMixTab);
-  if (existing) { await chrome.tabs.update(existing.id, { active: true }); return { mixId: existing.url.split("#")[1], tabId: existing.id }; }
-  const g = await chrome.tabGroups.get(groupId).catch(() => null);
-  const id = crypto.randomUUID().slice(0, 8);
-  const { mixes = {} } = await local.get("mixes");
-  mixes[id] = { id, groupId, title: g?.title || tabs.map((t) => hostOf(t.url)).filter(Boolean).slice(0, 3).join(" + ") || "Mix", chat: [], view: null, created: Date.now() };
-  await local.set({ mixes });
-  const last = tabs[tabs.length - 1];
-  const tab = await chrome.tabs.create({ url: `${MIX_URL}#${id}`, windowId: last?.windowId, index: last ? last.index + 1 : undefined, active: true });
-  await chrome.tabs.group({ tabIds: [tab.id], groupId }).catch(() => {});
-  publik.beacon("active_session");
-  return { mixId: id, tabId: tab.id };
-}
-
-/** Pick tabs → put them in a new group → mix that group. */
-async function mixFromTabs(tabIds, title) {
-  const tabs = (await Promise.all(tabIds.map((id) => chrome.tabs.get(id).catch(() => null)))).filter((t) => t && /^https?:/.test(t.url ?? ""));
-  if (tabs.length < 1) throw new Error("Pick at least one normal web page.");
-  const groupId = await chrome.tabs.group({ tabIds: tabs.map((t) => t.id), createProperties: { windowId: tabs[0].windowId } });
-  await chrome.tabGroups.update(groupId, { title: title || "mix", color: "orange" }).catch(() => {});
-  return mixFromGroup(groupId);
-}
+// ---------- context from other tabs ----------
+// While remolding one site, Remold can read the person's other open tabs: the ones in the same tab group if this tab
+// is in a group, otherwise every tab in the window. It can also open a page in a background tab (signed in as them).
 
 const hostOf = (u) => { try { return new URL(u).hostname.replace(/^www\./, ""); } catch { return ""; } };
 
-/** The live sources: every normal web page in the mix's group. */
-async function mixSources(mixId) {
-  const { mixes = {} } = await local.get("mixes");
-  const mix = mixes[mixId];
-  if (!mix) throw new Error("This mix was removed.");
-  const tabs = mix.groupId != null && mix.groupId !== -1 ? await chrome.tabs.query({ groupId: mix.groupId }).catch(() => []) : [];
-  return { mix, sources: tabs.filter((t) => !isMixTab(t) && /^https?:/.test(t.url ?? "")).map((t, i) => ({ sid: `s${i + 1}`, tabId: t.id, url: t.url, title: t.title, host: hostOf(t.url), favIconUrl: t.favIconUrl ?? null })) };
+async function contextTabs(tabId) {
+  const tab = await chrome.tabs.get(tabId).catch(() => null);
+  if (!tab) return [];
+  const all = tab.groupId !== -1 ? await chrome.tabs.query({ groupId: tab.groupId }) : await chrome.tabs.query({ windowId: tab.windowId });
+  const seen = new Set();
+  return all.filter((t) => t.id !== tabId && /^https?:/.test(t.url ?? "") && hostOf(t.url) !== hostOf(tab.url))
+    .map((t) => ({ tabId: t.id, host: hostOf(t.url), title: (t.title ?? "").slice(0, 80), url: t.url }))
+    .filter((t) => (seen.has(t.url) ? false : seen.add(t.url))).slice(0, 12);
+}
+
+async function readContext(want, tabs, selfUrl) {
+  const out = [];
+  for (const w of want) {
+    const t = w.tab ? tabs.find((x) => x.host === w.tab || x.host.endsWith(`.${w.tab}`) || x.url === w.tab) : null;
+    if (t) { const r = await extractTab(t.tabId); out.push({ tab: t.host, want: String(w.want ?? "").slice(0, 200), ...(r ? trimSource(r) : { error: "could not read that tab" }) }); continue; }
+    if (w.url && w.url !== selfUrl) { const tab0 = await chrome.tabs.query({ active: true, lastFocusedWindow: true }).then((x) => x[0]).catch(() => null); out.push({ url: w.url, want: String(w.want ?? "").slice(0, 200), ...(await lookup(w.url, tab0?.windowId)) }); continue; }
+    out.push({ tab: w.tab, want: w.want, error: "no open tab for that site; open it in this window (or this tab group) and ask again" });
+  }
+  return out;
 }
 
 async function extractTab(tabId, opts = {}) {
@@ -337,78 +340,45 @@ function waitLoaded(tabId, ms = 15000) {
 
 /** Visit a page in a background tab (signed in as the person), read it, close it. */
 async function lookup(url, windowId) {
-  if (!/^https?:\/\//.test(url)) return { url, error: "not a web address" };
-  const tab = await chrome.tabs.create({ url, active: false, windowId });
+  if (!/^https?:\/\//.test(url)) return { error: "not a web address" };
+  const tab = await chrome.tabs.create({ url, active: false, ...(windowId ? { windowId } : {}) });
   try {
     await waitLoaded(tab.id);
-    const r = await extractTab(tab.id, { scroll: false });
-    return r ? trimSource(r, 3500) : { url, error: "could not read the page" };
+    const r = await extractTab(tab.id, { scroll: true });
+    return r ? trimSource(r, 5000) : { error: "could not read the page" };
   } finally { chrome.tabs.remove(tab.id).catch(() => {}); }
 }
 
-/** Keep each source small enough for the model. */
+/** Keep a read small enough for the model. */
 function trimSource(r, budget = 7000) {
   const items = [];
   let used = 0;
   for (const list of r.lists ?? []) for (const it of list.items) {
-    const line = { text: it.text.slice(0, 500), links: it.links.slice(0, 4), img: it.img || undefined, time: it.time || undefined };
+    const line = { text: it.text.slice(0, 400), links: it.links.slice(0, 3) };
     used += JSON.stringify(line).length;
     if (used > budget) break;
     items.push(line);
   }
-  return { url: r.url, title: r.title, items, text: items.length < 4 ? (r.text ?? "").slice(0, Math.max(1500, budget - used)) : (r.screen ?? "").slice(0, 1200) };
+  return { title: r.title, url: r.url, items, text: items.length < 4 ? (r.text ?? "").slice(0, Math.max(1500, budget - used)) : undefined };
 }
 
-async function mixRun(mixId, prompt, sender) {
-  const { mix, sources } = await mixSources(mixId);
-  if (!sources.length) throw new Error("This group has no web pages. Add tabs to the group, then ask again.");
-  const say = (text) => chrome.tabs.sendMessage(sender.tab.id, { type: "mixProgress", mixId, text }).catch(() => {});
-  const data = [];
-  for (const s of sources) {
-    say(`Reading ${s.host}…`);
-    const r = await extractTab(s.tabId);
-    data.push({ id: s.sid, site: s.host, ...(r ? trimSource(r) : { url: s.url, title: s.title, items: [], text: "(could not read this tab)" }) });
-  }
-  const history = (mix.chat ?? []).filter((c) => c.role === "you").slice(-4).map((c) => c.text);
-  let lookups = [];
-  let out = null;
-  for (let round = 0; round < 3; round++) {
-    say(round ? "Building it with what it found…" : "Building your mix…");
-    const text = await publik.chat({ system: MIX_SYSTEM, messages: [{ role: "user", content: mixUserMessage({ sources: data, lookups, request: prompt, earlier: history, round }) }], tier: "smart", maxTokens: 8000 });
-    out = parseJSON(text);
-    if (!out) throw new Error("The AI answered in a shape Remold could not read. Try again.");
-    const want = Array.isArray(out.lookups) ? out.lookups.filter((l) => l && typeof l.url === "string").slice(0, 8) : [];
-    if (!want.length || round === 2) break;
-    say(`Visiting ${want.length} page${want.length === 1 ? "" : "s"}: ${String(out.reply ?? "").slice(0, 120)}`);
-    const got = [];
-    for (let i = 0; i < want.length; i += 3) got.push(...await Promise.all(want.slice(i, i + 3).map((l) => lookup(l.url, sender.tab.windowId).then((r) => ({ for: String(l.for ?? "").slice(0, 120), ...r })))));
-    lookups = lookups.concat(got);
-  }
-  const view = cleanView(out.view, data);
-  const reply = String(out.reply ?? (view ? "Done." : "I couldn't build that. Try saying it another way.")).slice(0, 600);
-  const { mixes = {} } = await local.get("mixes");
-  if (mixes[mixId]) {
-    mixes[mixId].chat = [...(mixes[mixId].chat ?? []), { role: "you", text: prompt }, { role: "ai", text: reply, lookups: lookups.length }].slice(-30);
-    if (view) { mixes[mixId].view = view; mixes[mixId].prompt = prompt; mixes[mixId].updated = Date.now(); }
-    await local.set({ mixes });
-  }
-  return { reply, view, lookups: lookups.length, sources: data.map((d) => ({ id: d.id, site: d.site, items: d.items.length })) };
+// ---------- memory ----------
+async function memoryFor(host) {
+  const m = (await local.get("memory")).memory ?? [];
+  return m.filter((f) => !f.host || f.host === host).slice(-30).map((f) => `${f.host ? `[${f.host}] ` : ""}${f.text}`);
 }
-
-const LAYOUTS = new Set(["feed", "cards", "table", "board", "columns"]);
-function cleanView(v, data) {
-  if (!v || typeof v !== "object" || !Array.isArray(v.items)) return null;
-  const sites = Object.fromEntries(data.map((d) => [d.id, d.site]));
-  const url = (u) => (typeof u === "string" && /^https?:\/\//.test(u) ? u.slice(0, 1000) : undefined);
-  const item = (x) => ({
-    source: typeof x.source === "string" && sites[x.source] ? x.source : undefined,
-    title: str(x.title, 300), text: str(x.text, 2000), image: url(x.image), link: url(x.link), meta: str(x.meta, 200),
-    tags: arr(x.tags).map((t) => str(t, 40)).filter(Boolean).slice(0, 6),
-    fields: x.fields && typeof x.fields === "object" ? Object.fromEntries(Object.entries(x.fields).slice(0, 10).map(([k, val]) => [str(k, 40), str(String(val ?? ""), 300)])) : undefined,
-    group: str(x.group, 80) || undefined,
-  });
-  return {
-    title: str(v.title, 100) || "Mix", note: str(v.note, 400), layout: LAYOUTS.has(v.layout) ? v.layout : "feed", sites,
-    items: v.items.slice(0, 200).map((x) => ({ ...item(x ?? {}), related: arr(x?.related).slice(0, 4).map((r) => item(r ?? {})) })),
-  };
+async function remember(facts, host, byHand = false) {
+  const list = (Array.isArray(facts) ? facts : []).map((f) => (typeof f === "string" ? { text: f } : f)).filter((f) => f?.text?.trim()).slice(0, 5);
+  if (!list.length) return [];
+  const m = (await local.get("memory")).memory ?? [];
+  const norm = (t) => t.toLowerCase().replace(/[^a-z0-9 ]/g, "").trim();
+  const added = [];
+  for (const f of list) {
+    const text = String(f.text).trim().slice(0, 200);
+    if (m.some((x) => norm(x.text) === norm(text))) continue;
+    const item = { id: crypto.randomUUID().slice(0, 8), text, host: byHand ? host : (f.site === "all" ? null : host), at: Date.now() };
+    m.push(item); added.push(item);
+  }
+  await local.set({ memory: m.slice(-120) });
+  return added;
 }

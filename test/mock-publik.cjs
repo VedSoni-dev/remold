@@ -28,6 +28,15 @@ http.createServer((req, res) => {
         const fb = user.includes("What happened when your last mod ran");
         if (/AI/.test(asked)) out = mods.ai; else if (/calm/i.test(asked) && /paper/.test(asked)) out = mods.calm(c);
         else if (/thumbnail/i.test(asked)) { ytTries++; out = mods.thumbs(fb); } else if (/clickbait/i.test(asked)) out = mods.titles(c);
+        else if (/creators in my/i.test(asked)) {
+          const ctx = user.includes("What you read from their other tabs") ? JSON.parse(user.split(/What you read from their other tabs[^:]*:\n/)[1].split("\n\n")[0]) : null;
+          if (!ctx) out = { reply: "Reading your following feed first.", read: [{ tab: "127.0.0.1", want: "the creators they follow" }] };
+          else {
+            const names = ctx.flatMap((c) => (c.items || []).map((i) => i.text.split(" @")[0].trim())).filter(Boolean);
+            out = { reply: `Only videos from ${names.length} creators you follow stay; the rest are collapsed.`, remember: ["Follows lofi and chill music channels", { text: "Prefers seeing only people they follow", site: "all" }],
+              mod: { title: "Only creators I follow", summary: "Keeps YouTube videos from creators in my other feed.", match: [{ items: "ytd-video-renderer", text: "ytd-channel-name", list: names, mode: "keep", action: "collapse", label: "Not someone you follow" }] } };
+          }
+        }
         else if (/tone/i.test(asked)) out = { reply: "Each headline gets its tone, and hype ones are tinted.", mod: { title: "Headline tone", summary: "Labels each story's tone.",
           ai: [{ items: "tr.athing", text: ".titleline > a", ask: "the tone of this headline in one word", then: "badge", badge_at: "td.title:last-child" },
                { items: "tr.athing", text: ".titleline > a", ask: "is this headline hype or calm?", then: "style", styles: { hype: "background:rgba(196,87,46,.14)", calm: "opacity:.85" } }] } };

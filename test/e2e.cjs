@@ -45,6 +45,13 @@ const log = (...a) => console.log(new Date().toISOString().slice(11, 19), ...a);
   await panel.close();
   const only = process.env.ONLY;
   if (!only || only === "hn") await ask("https://news.ycombinator.com/", ["Collapse every post about AI, LLMs or AI companies", "Make it look calm: warm paper background, serif headlines, more space between posts"], "hn");
+  if (only === "ctx") {
+    const f = await ctx.newPage(); await f.goto("http://127.0.0.1:8799/following.html");
+    await ask("https://www.youtube.com/results?search_query=lofi", ["Only show videos from creators in my following feed"], "ctx");
+    const panel2 = ctx.pages().find((p) => p.url().includes("panel.html?tab="));
+    await panel2.click(".who"); await panel2.waitForTimeout(300); await panel2.click("text=Everything you've made"); await panel2.waitForTimeout(600);
+    await panel2.screenshot({ path: `${out}/ctx-library.png` });
+  }
   if (only === "tone") await ask("https://news.ycombinator.com/", ["Show the tone of every headline and tint the hype ones"], "tone");
   if (only === "js") { await sw.evaluate(() => chrome.storage.local.set({ customCode: true })); await ask("https://news.ycombinator.com/", ["Use custom code to label each post's topic"], "js"); }
   if (!only || only === "yt") await ask("https://www.youtube.com/results?search_query=lofi", ["Get rid of all thumbnails and anything Shorts", "Rewrite clickbait titles as plain, calm titles"], "yt");

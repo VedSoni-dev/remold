@@ -4,7 +4,7 @@
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
 <title>Remold: redesign the internet</title>
-<meta name="description" content="A free, open-source Chrome extension. Say how any website should look or behave and a swarm rebuilds it. Filter the slop with AI, kill thumbnails, mix your tabs into one.">
+<meta name="description" content="A free, open-source Chrome extension. Say how any website should look or behave and a swarm rebuilds it. Filter the slop with AI, kill thumbnails, use your other tabs as context.">
 <meta property="og:title" content="Remold: redesign the internet">
 <meta property="og:description" content="Say how any website should look or behave and a swarm rebuilds it. Free and open source.">
 <meta property="og:image" content="https://remold.vedantsoni.com/img/poster.jpg">
@@ -183,7 +183,7 @@ body.remolding .page { animation:shake .5s steps(6) 1; }
   <div class="hero">
     <div class="kicker" data-wire="span.kicker"><i></i>Free Chrome extension · open source</div>
     <h1 data-wire="h1.hero-title"><span class="glitch">Redesign</span><br>the <span class="hot">internet.</span></h1>
-    <p class="lede" data-wire="p.lede">Every website was built for them. Tell Remold what you want and a swarm tears the page down and rebuilds it your way. Kill the slop, gut the feed, mix your tabs, make it yours.</p>
+    <p class="lede" data-wire="p.lede">Every website was built for them. Tell Remold what you want and a swarm tears the page down and rebuilds it your way. Kill the slop, gut the feed, pull in your other tabs, make it yours.</p>
     <div class="ctas" data-wire="div.ctas">
       <a class="btn go" href="https://github.com/VedSoni-dev/remold/releases/latest">Get Remold free →</a>
       <a class="btn" href="https://github.com/VedSoni-dev/remold">Source code</a>
@@ -202,7 +202,7 @@ body.remolding .page { animation:shake .5s steps(6) 1; }
       <div class="say" data-wire='article[data-testid="mod"]'><span class="tag">youtube</span><q>Kill thumbnails and Shorts. Forever.</q><span>Every YouTube page, every visit.</span></div>
       <div class="say" data-wire='article[data-testid="mod"]'><span class="tag">youtube</span><q>Rewrite clickbait titles as plain ones</q><span>Titles you can actually trust.</span></div>
       <div class="say" data-wire='article[data-testid="mod"]'><span class="tag">any site</span><q>Tag every post with its tone</q><span>Live labels on whatever is on screen.</span></div>
-      <div class="say" data-wire='article[data-testid="mod"]'><span class="tag">combine</span><q>Match each X poster to their LinkedIn</q><span>Data from every tab in the group, in one new tab.</span></div>
+      <div class="say" data-wire='article[data-testid="mod"]'><span class="tag">youtube + x</span><q>Only show videos from creators in my X feed</q><span>Context from your other tabs, instantly.</span></div>
       <div class="say" data-wire='article[data-testid="mod"]'><span class="tag">any site</span><q>Black, brutal, monospace. All of it.</q><span>A whole new skin in one sentence.</span></div>
     </div>
   </section>
@@ -228,16 +228,16 @@ body.remolding .page { animation:shake .5s steps(6) 1; }
 
   <section>
     <div class="split">
-      <div class="shot" data-wire="div.mix-tab"><img src="img/mix.png" alt="A mix tab combining Hacker News and YouTube tabs into one feed" loading="lazy"></div>
+      <div class="shot" data-wire="div.mix-tab"><img src="img/mix.png" alt="YouTube remolded with names read from another tab" loading="lazy"></div>
       <div>
-        <div class="sec-k">03 / combine</div>
-        <h2 data-wire="h2">Many tabs. One brain.</h2>
+        <div class="sec-k">03 / context</div>
+        <h2 data-wire="h2">Your other tabs are context.</h2>
         <ul class="list">
-          <li><b>Put tabs in a Chrome tab group:</b> X, YouTube, LinkedIn, anything. They stay open as live sources.</li>
-          <li><b>Hit Combine.</b> One new tab joins the group and reads all of them.</li>
-          <li><b>Ask for anything across them:</b> "match each X poster to their LinkedIn", "pair each video with what people say about it on X", "one table of everything".</li>
-          <li><b>It goes and gets what it needs</b>, opening pages for you while you're signed in, then builds it: feed, cards, table, board or columns.</li>
-          <li><b>Live mode</b> rebuilds every two minutes as your tabs change.</li>
+          <li><b>Remold the site you're on</b>, using what's in your other tabs.</li>
+          <li><b>"Only show YouTube videos from creators in my X feed."</b> It reads your X tab, pulls the names, keeps only theirs.</li>
+          <li><b>It goes and gets what it needs:</b> opens a page for you, signed in as you, when the data isn't on screen.</li>
+          <li><b>Tab groups choose the context:</b> put tabs in a group and only those are read.</li>
+          <li><b>It remembers you.</b> Your taste carries across every site and chat. Delete anything, any time.</li>
         </ul>
       </div>
     </div>
@@ -247,7 +247,7 @@ body.remolding .page { animation:shake .5s steps(6) 1; }
     <div class="sec-k">04 / install</div>
     <h2 data-wire="h2">Sixty seconds.</h2>
     <ol class="steps" data-wire="ol.install">
-      <li>Download <b>remold-0.3.0.zip</b> from the <a href="https://github.com/VedSoni-dev/remold/releases/latest">latest release</a>, unzip it.</li>
+      <li>Download <b>remold-0.4.0.zip</b> from the <a href="https://github.com/VedSoni-dev/remold/releases/latest">latest release</a>, unzip it.</li>
       <li>Open <code>chrome://extensions</code>, flip on <b>Developer mode</b>.</li>
       <li><b>Load unpacked</b> → pick the folder.</li>
       <li>Hit the icon (⌘⇧Y), <b>Sign in with publik</b>. Go.</li>
