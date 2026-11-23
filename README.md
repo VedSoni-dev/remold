@@ -14,7 +14,7 @@
 
 Until it's on the Chrome Web Store:
 
-1. Download `remold-0.2.0.zip` from [Releases](https://github.com/VedSoni-dev/remold/releases) and unzip it.
+1. Download `remold-0.2.1.zip` from [Releases](https://github.com/VedSoni-dev/remold/releases) and unzip it.
 2. Open `chrome://extensions`, turn on **Developer mode** (top right), click **Load unpacked**, pick the unzipped folder.
 3. Click Remold's icon (or ⌘⇧Y / Ctrl+Shift+Y). The side panel opens.
 4. **Sign in with publik**. AI runs on your publik plan.
